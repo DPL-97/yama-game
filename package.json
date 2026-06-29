@@ -3,10 +3,14 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "electron:build": "vite build --base ./ && electron-builder",
+    "electron:build:mac": "vite build --base ./ && electron-builder --mac",
+    "electron:build:win": "vite build --base ./ && electron-builder --win"
   },
   "dependencies": {
     "lucide-react": "^0.511.0",
@@ -15,9 +19,51 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.5.2",
+    "electron": "^36.9.5",
+    "electron-builder": "^25.1.8",
     "vite": "^6.3.5"
   },
+  "build": {
+    "appId": "com.dpl97.yamagame",
+    "productName": "Yama Game",
+    "copyright": "Copyright © 2026 DPL-97",
+    "files": [
+      "dist/**/*",
+      "electron/main.cjs"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "mac": {
+      "category": "public.app-category.games",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
   "allowScripts": {
-    "esbuild@0.25.12": true
+    "esbuild@0.25.12": true,
+    "electron@36.9.5": true,
+    "fsevents@2.3.3": true
   }
 }
