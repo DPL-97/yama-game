@@ -264,49 +264,35 @@ const TRICK_ANIM = {
 function TrickCell({ play, seat, signal }) {
   const prevCardIdRef = useRef(null);
   const lastSignalKeyRef = useRef(null);
-  const [animating, setAnimating] = useState(false); // true = Karte steht (unsichtbar) an der Startposition
+  const [animKey, setAnimKey] = useState(0);
   const [variant, setVariant] = useState("enter");
 
   useEffect(() => {
     if (!play) {
       prevCardIdRef.current = null;
       lastSignalKeyRef.current = null;
-      setAnimating(false);
       return;
     }
     const isNewCard = play.card.id !== prevCardIdRef.current;
-    // Stimmt das aktuell aktive Signal des Spielers exakt mit dieser liegenden Karte überein?
     const matches = signal && signal.cardId === play.card.id;
     const signalKey = matches ? `${signal.type}:${signal.cardId}` : null;
-    // Neue Karte -> immer einmal einfliegen. Gleiche Karte, aber gerade erst (nachträglich)
-    // signalisiert -> nochmal mit der passenden Signal-Animation "nachspielen".
     const shouldReplay = isNewCard || (signalKey && signalKey !== lastSignalKeyRef.current);
     if (!shouldReplay) return;
 
     prevCardIdRef.current = play.card.id;
     lastSignalKeyRef.current = signalKey;
     setVariant(matches ? signal.type : "enter");
-    setAnimating(true);
-    // Zwei rAF-Schritte: erst die Startposition wirklich rendern lassen, dann erst auf die
-    // Zielposition umschalten - sonst greift die CSS-Transition nicht (kein Sprung sichtbar).
-    let raf2;
-    const raf1 = requestAnimationFrame(() => { raf2 = requestAnimationFrame(() => setAnimating(false)); });
-    return () => { cancelAnimationFrame(raf1); if (raf2) cancelAnimationFrame(raf2); };
+    setAnimKey(k => k + 1);
   }, [play, signal]);
 
-  const fly = SEAT_FLY[seat] || { dx:0, dy:0, rot:0 };
   const cfg = TRICK_ANIM[variant] || TRICK_ANIM.enter;
-  const startTransform = `translate(${fly.dx}px,${fly.dy}px) scale(${cfg.scaleFrom}) rotate(${fly.rot}deg)`;
-  const endTransform = `translate(0,0) scale(1) rotate(${cfg.rotEnd}deg)`;
+  const animName = `cardAnim-${seat}-${variant}`;
 
   return (
     <div style={{width:44,height:58,display:"flex",alignItems:"center",justifyContent:"center"}}>
       {play ? (
-        <div style={{
-          transform: animating ? startTransform : endTransform,
-          opacity: animating ? 0 : 1,
-          filter: animating ? cfg.flashFrom : "brightness(1)",
-          transition: animating ? "none" : `transform ${cfg.dur} ${cfg.ease}, opacity 0.18s ease-out, filter 0.3s ease-out`,
+        <div key={animKey} style={{
+          animation: `${animName} ${cfg.dur} ${cfg.ease} both`,
         }}>
           <CardFace card={play.card} clickable={false}/>
         </div>
@@ -670,6 +656,54 @@ function GameView({ gameState, mySeat, onAction, onNewGame, myHand }) {
         @keyframes myTurn {
           0%,100% { border-color:rgba(201,162,39,0.35); }
           50%     { border-color:rgba(201,162,39,0.9); }
+        }
+        @keyframes cardAnim-N-enter {
+          from { transform:translate(0px,-44px) scale(0.65) rotate(-8deg); opacity:0; }
+          to   { transform:translate(0,0) scale(1) rotate(0deg); opacity:1; }
+        }
+        @keyframes cardAnim-N-feste {
+          from { transform:translate(0px,-44px) scale(0.55) rotate(-8deg); opacity:0; filter:brightness(1.6); }
+          to   { transform:translate(0,0) scale(1) rotate(0deg); opacity:1; filter:brightness(1); }
+        }
+        @keyframes cardAnim-N-gedreht {
+          from { transform:translate(0px,-44px) scale(0.6) rotate(-8deg); opacity:0; }
+          to   { transform:translate(0,0) scale(1) rotate(810deg); opacity:1; }
+        }
+        @keyframes cardAnim-S-enter {
+          from { transform:translate(0px,44px) scale(0.65) rotate(8deg); opacity:0; }
+          to   { transform:translate(0,0) scale(1) rotate(0deg); opacity:1; }
+        }
+        @keyframes cardAnim-S-feste {
+          from { transform:translate(0px,44px) scale(0.55) rotate(8deg); opacity:0; filter:brightness(1.6); }
+          to   { transform:translate(0,0) scale(1) rotate(0deg); opacity:1; filter:brightness(1); }
+        }
+        @keyframes cardAnim-S-gedreht {
+          from { transform:translate(0px,44px) scale(0.6) rotate(8deg); opacity:0; }
+          to   { transform:translate(0,0) scale(1) rotate(810deg); opacity:1; }
+        }
+        @keyframes cardAnim-E-enter {
+          from { transform:translate(44px,0px) scale(0.65) rotate(8deg); opacity:0; }
+          to   { transform:translate(0,0) scale(1) rotate(0deg); opacity:1; }
+        }
+        @keyframes cardAnim-E-feste {
+          from { transform:translate(44px,0px) scale(0.55) rotate(8deg); opacity:0; filter:brightness(1.6); }
+          to   { transform:translate(0,0) scale(1) rotate(0deg); opacity:1; filter:brightness(1); }
+        }
+        @keyframes cardAnim-E-gedreht {
+          from { transform:translate(44px,0px) scale(0.6) rotate(8deg); opacity:0; }
+          to   { transform:translate(0,0) scale(1) rotate(810deg); opacity:1; }
+        }
+        @keyframes cardAnim-W-enter {
+          from { transform:translate(-44px,0px) scale(0.65) rotate(-8deg); opacity:0; }
+          to   { transform:translate(0,0) scale(1) rotate(0deg); opacity:1; }
+        }
+        @keyframes cardAnim-W-feste {
+          from { transform:translate(-44px,0px) scale(0.55) rotate(-8deg); opacity:0; filter:brightness(1.6); }
+          to   { transform:translate(0,0) scale(1) rotate(0deg); opacity:1; filter:brightness(1); }
+        }
+        @keyframes cardAnim-W-gedreht {
+          from { transform:translate(-44px,0px) scale(0.6) rotate(-8deg); opacity:0; }
+          to   { transform:translate(0,0) scale(1) rotate(810deg); opacity:1; }
         }
       `}</style>
 
@@ -1318,7 +1352,18 @@ function CPUMode({ playerName, onBack }) {
       if (action.type==="playCard") {
         if (prev.phase!=="playing"||prev.trickComplete||prev.currentTurn!=="S") return prev;
         if (!isCardPlayable(action.card,prev.hands["S"],prev)) return prev;
-        return applyPlayCard(prev,"S",action.card);
+        const next = applyPlayCard(prev,"S",action.card);
+        // Ein vor dem Ausspielen gesetztes Signal ("Feste"/"Gedreht") hat noch keine cardId.
+        // Jetzt an die tatsächlich gespielte Karte binden, damit sie MIT der passenden
+        // Signal-Animation in die Mitte fliegt (so wie es auch die Bots tun).
+        const sig = next.signals?.["S"];
+        if (sig && sig.cardId == null) {
+          const boundSuit = sig.type === SIGNALS.GEDREHT
+            ? (next.leadSuit ?? action.card.suit)
+            : action.card.suit;
+          return {...next, signals:{...next.signals, ["S"]:{...sig, cardId:action.card.id, suit:boundSuit, trickNumber:prev.trickNumber}}};
+        }
+        return next;
       }
       if (action.type==="signal") {
         const ex = prev.signals?.["S"];
