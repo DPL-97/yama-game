@@ -1873,7 +1873,12 @@ function OnlineLobby({ initialRoom, isCreator, onEnterGame, onBack }) {
     const withVer = {...next, version:(roomRef.current?.version??0)+1, updatedAt:Date.now()};
     roomRef.current = withVer; setRoom(withVer);
     const server = await writeRoom(withVer);
-    if (server && server.version > withVer.version) { roomRef.current = server; setRoom(server); }
+    // Der Server ist immer autoritativ. Weicht seine zurückgegebene Version von
+    // unserer ab (egal ob höher ODER gleich/niedriger, weil unser Schreibzugriff
+    // wegen eines gleichzeitigen Commits eines anderen Clients abgelehnt wurde),
+    // MUSS der zurückgegebene Stand übernommen werden – sonst glaubt dieser
+    // Client fälschlich, sein eigener (in Wahrheit verworfener) Stand sei aktiv.
+    if (server && server.version !== withVer.version) { roomRef.current = server; setRoom(server); }
   }
 
   useEffect(() => {
@@ -2079,16 +2084,33 @@ function OnlineGame({ initialRoom, mySeat, myName, onLeave }) {
   const gs = room.gs;
   const botSeats = SEATS.filter(s => room.players[s]?.bot);
 
+  // commit() gibt zurück, ob der Schreibzugriff vom Server tatsächlich
+  // übernommen wurde ({accepted:true}) oder wegen eines gleichzeitigen
+  // Commits eines anderen Clients abgelehnt wurde ({accepted:false}).
+  // WICHTIG: Ein abgelehnter Schreibzugriff muss erkannt werden, sobald die
+  // vom Server zurückgegebene Version von unserer erwarteten abweicht — nicht
+  // nur, wenn sie größer ist. Bei exakter Versionsgleichheit (zwei Clients
+  // committen "gleichzeitig" denselben Versionssprung) hat der Server einen
+  // von beiden abgelehnt; wird das nicht erkannt, glaubt der abgelehnte
+  // Client fälschlich, sein lokaler State (z.B. ein gespielter Stich) sei
+  // gespeichert, obwohl der Server ihn nie erhalten hat. Genau das führte zu
+  // dem gemeldeten Bug: ein Kartenzug "verschwand" und die Zugreihenfolge
+  // sprang auf einen älteren Spieler zurück.
   async function commit(nextRoom) {
     const withVer = {...nextRoom, version:(roomRef.current?.version??0)+1, updatedAt:Date.now()};
     roomRef.current = withVer; setRoom(withVer);
     const server = await writeRoom(withVer);
     setConnState(server ? "ok" : "err");
-    // Server ist autoritativ: hat dort inzwischen jemand anderes eine höhere
-    // Version geschrieben, übernehmen wir dessen Stand statt unseres eigenen.
-    if (server && server.version > withVer.version) {
+    if (!server) return { accepted:false, room:null };
+    if (server.version !== withVer.version) {
+      // Abgelehnt: der Server hatte bereits einen anderen Schreibzugriff mit
+      // derselben oder einer höheren Version übernommen. Wir müssen seinen
+      // autoritativen Stand übernehmen, egal ob die Version größer, gleich
+      // oder (durch einen Reset) sogar kleiner ausfällt.
       roomRef.current = server; setRoom(server);
+      return { accepted:false, room:server };
     }
+    return { accepted:true, room:withVer };
   }
 
   useEffect(() => {
@@ -2125,14 +2147,22 @@ function OnlineGame({ initialRoom, mySeat, myName, onLeave }) {
     return () => clearInterval(id);
   }, [isHost]);
 
-  function dispatch(action) {
+  async function dispatch(action, attemptsLeft = 3) {
     const r = roomRef.current;
     if (!r?.gs) return;
     if (action.type === "nextHand" && r.host !== mySeat) return;
     if (action.type === "acknowledgeEvent") return;
     const next = applyGameAction(r.gs, mySeat, action);
     if (next === r.gs) return;
-    commit({...r, gs: next});
+    const result = await commit({...r, gs: next});
+    if (!result.accepted && attemptsLeft > 0) {
+      // Unser Schreibzugriff wurde verworfen, weil ein anderer Client (Host-
+      // Bot-Timer, Trick-Abschluss, gegnerischer Spielzug, ...) zwischenzeitlich
+      // committet hat. roomRef.current zeigt jetzt bereits auf den echten
+      // Serverstand (siehe commit()) – wir wenden die Aktion des Spielers
+      // einfach erneut darauf an, statt sie verloren gehen zu lassen.
+      dispatch(action, attemptsLeft - 1);
+    }
   }
 
   // ── HOST-AUFGABEN ──
