@@ -1,0 +1,2303 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="theme-color" content="#120e24"/>
+<title>Yama Game</title>
+<script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+<style>html,body{margin:0;padding:0;background:#120e24;}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/plain" id="app-source">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ---------- Mini-Icons (ersetzen lucide-react, keine Abhängigkeit nötig) ----------
+const Icon = ({ch,size=16,style}) => <span style={{fontSize:size,lineHeight:1,display:"inline-flex",alignItems:"center",justifyContent:"center",transition:"transform 0.2s",...style}}>{ch}</span>;
+const Info = (p) => <Icon ch="ℹ" {...p}/>;
+const X = (p) => <Icon ch="✕" {...p}/>;
+const ChevronRight = (p) => <Icon ch="›" {...p}/>;
+const RotateCcw = (p) => <Icon ch="↻" {...p}/>;
+const ChevronDown = (p) => <Icon ch="▾" {...p}/>;
+const Shuffle = (p) => <Icon ch="🔀" {...p}/>;
+const Users = (p) => <Icon ch="👥" {...p}/>;
+const Cpu = (p) => <Icon ch="🖥️" {...p}/>;
+const Copy = (p) => <Icon ch="⧉" {...p}/>;
+const LogIn = (p) => <Icon ch="↪" {...p}/>;
+
+// ---------- Konstanten ----------
+const SUIT_KEYS = ["SP", "HE", "DI", "CL"];
+const SUIT_INFO = {
+  SP: { symbol: "♠", name: "Pik",   color: "#8fa6ff", textColor: "#3548b0", isRed: false },
+  HE: { symbol: "♥", name: "Herz",  color: "#ff5c8a", textColor: "#d1194a", isRed: true  },
+  DI: { symbol: "♦", name: "Karo",  color: "#ffb43e", textColor: "#c17300", isRed: true  },
+  CL: { symbol: "♣", name: "Kreuz", color: "#3dffa0", textColor: "#0a8a52", isRed: false },
+};
+const RANK_LABEL = { 14:"A",13:"K",12:"D",11:"B",10:"10",9:"9",8:"8",7:"7",6:"6",5:"5",4:"4",3:"3",2:"2" };
+const SEATS = ["S","E","N","W"];
+const PERSONAS = ["Yama","Parn","Aaron","Grace","Denny","Philipp","Batu","Rafa","Max","David","Luca"];
+const TARGET_TRICKS = 7;
+const COLORS = {
+  bg:"#1a1530", bg2:"#120e24", felt:"#241c45", feltDark:"#1a1535",
+  gold:"#ffc640", goldLight:"#ffe066", cream:"#f5f0ff",
+  redAccent:"#ff4d6a", redDark:"#b8233f",
+  neonPurple:"#b454ff", neonBlue:"#46d6ff", neonGreen:"#3dffa0",
+  cardFace:"#f5f0ff", cardBack:"#5a3ca8",
+  panel:"#241c45", panelDark:"#1a1535",
+  outline:"#0c0918",
+};
+const PXR = 3;
+function hardShadow(x, y, col){ return `${x}px ${y}px 0px ${col}`; }
+const PIXEL_FONT = "'Courier New', monospace";
+const SIGNALS = { FESTE:"feste", GEDREHT:"gedreht" };
+const SIGNAL_INFO = {
+  feste:   { label:"Feste spielen", emoji:"💪", short:"FESTE", color:"#3dffa0",
+             meaning:"Partner soll dieselbe Farbe mit dem niedrigsten Wert nochmal ausspielen – du gewinnst den nächsten Stich dieser Farbe." },
+  gedreht: { label:"Gedreht in die Mitte", emoji:"🔄", short:"LETZTE", color:"#ffb43e",
+             meaning:"Letzte Karte dieser Farbe. Du kannst jetzt trumpfen. Partner kann Trumpf ausspielen um 2 gegnerische Trümpfe rauszuholen." },
+};
+
+// ---------- Online-Multiplayer Konstanten ----------
+// Sync läuft über den eigenen kleinen Node-Server (server.js) per Polling.
+const POLL_MS = 1000;
+const HOST_TIMEOUT_MS = 8000;
+const HOST_HEARTBEAT_MS = 4000;
+function genRoomCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+  let c = "";
+  for (let i=0;i<4;i++) c += chars[Math.floor(Math.random()*chars.length)];
+  return c;
+}
+const SEAT_LABEL = { S:"Süd", N:"Nord", E:"Ost", W:"West" };
+
+// ---------- Server-Anbindung ----------
+async function readRoom(code) {
+  try {
+    const res = await fetch(`/api/room/${code}`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) { return null; }
+}
+// Der Server akzeptiert einen Schreibzugriff nur, wenn die Version höher ist
+// als die dort gespeicherte, und antwortet immer mit dem autoritativen Stand.
+async function writeRoom(room, retries = 1) {
+  try {
+    const res = await fetch(`/api/room/${room.code}`, {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(room),
+    });
+    if (!res.ok) throw new Error("write failed");
+    return await res.json();
+  } catch (e) {
+    if (retries > 0) {
+      await new Promise(r => setTimeout(r, 400));
+      return writeRoom(room, retries - 1);
+    }
+    console.error("Raum konnte nicht gespeichert werden:", e);
+    return null;
+  }
+}
+function emptyRoom(code) {
+  return {
+    code, version: 0, phase: "lobby",
+    players: { S:null, E:null, N:null, W:null },
+    host: null, gs: null, updatedAt: Date.now(),
+  };
+}
+
+// ---------- Lustige Sprüche ----------
+const SEVEN_ZERO_TAUNTS = [
+  "Sieben zu Null. Vielleicht solltet ihr es mal mit Schach probieren.",
+  "0 Stiche. Habt ihr überhaupt Karten gesehen heute?",
+  "Das war kein Kartenspiel mehr, das war eine Hinrichtung.",
+  "7:0 — selbst eure Großmutter hätte besser gespielt.",
+  "Glückwunsch, ihr habt soeben Geschichte geschrieben. Schlechte Geschichte.",
+  "Null Stiche. NULL. Geht zurück zum Mau-Mau.",
+  "Das nennt man wohl eine 'restlose Demontage'.",
+  "Selbst der Joker hätte sich für euch geschämt.",
+  "Tipp fürs nächste Mal: Karten anschauen hilft.",
+  "Ihr habt nicht verloren, ihr seid eliminiert worden.",
+];
+const BESTIEGEN_TAUNTS = [
+  "Die Dame hat dem König nicht widerstehen können. Bestiegen!",
+  "Ein Blick, ein Stich — die Dame liegt dem König zu Füßen.",
+  "Der König macht ihr ein Angebot, das sie nicht ablehnen kann.",
+  "Zack, erobert! Die Dame gehört jetzt dem König.",
+  "Charme schlägt Krone... nein, Moment, die Krone gewinnt doch.",
+  "Der König tanzt mit der Dame — und führt, wie immer.",
+];
+const FAMILIE_TAUNTS = [
+  "★ FAMILIENTREFFEN! ★ Bube, Dame und König {suit} alle im selben Stich!",
+  "Die ganze Familie {suit} ist erschienen — was für ein Auftritt!",
+  "B, D, K {suit} im selben Stich. Das nennt man Stil.",
+  "Familie komplett! {suit} feiert Wiedersehen im Stich.",
+];
+
+const teamOf = (p) => (p==="S"||p==="N" ? "home" : "away");
+
+// ---------- Hilfsfunktionen ----------
+function buildDeck() {
+  const d=[];
+  for(const s of SUIT_KEYS) for(let r=2;r<=14;r++) d.push({suit:s,rank:r,id:`${s}${r}`});
+  return d;
+}
+function shuffle(arr) {
+  const a=[...arr];
+  for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}
+  return a;
+}
+function pileShuffle(deck, piles) {
+  const stacks = Array.from({ length: piles }, () => []);
+  deck.forEach((card, i) => stacks[i % piles].push(card));
+  const order = shuffle(stacks.map((_, i) => i));
+  const result = [];
+  order.forEach(idx => result.push(...stacks[idx]));
+  return result;
+}
+function cutDeck(deck) {
+  const cut = Math.floor(deck.length * (0.3 + Math.random() * 0.4));
+  return [...deck.slice(cut), ...deck.slice(0, cut)];
+}
+function realisticShuffle(deck) {
+  let d = [...deck];
+  d = pileShuffle(d, 4);
+  d = pileShuffle(d, 3);
+  d = pileShuffle(d, 5);
+  d = cutDeck(d);
+  return d;
+}
+function sortHandWithTrump(cards, trumpSuit) {
+  if(!trumpSuit){
+    const order={SP:0,HE:1,DI:2,CL:3};
+    return [...cards].sort((a,b)=>order[a.suit]-order[b.suit]||b.rank-a.rank);
+  }
+  const trumpIsRed = SUIT_INFO[trumpSuit].isRed;
+  const nonTrump = SUIT_KEYS.filter(s=>s!==trumpSuit);
+  const opp = nonTrump.filter(s=>SUIT_INFO[s].isRed!==trumpIsRed);
+  const same = nonTrump.filter(s=>SUIT_INFO[s].isRed===trumpIsRed);
+  const ordered=[trumpSuit, opp[0], same[0], opp[1]].filter(Boolean);
+  const idx={};ordered.forEach((s,i)=>idx[s]=i);
+  return [...cards].sort((a,b)=>idx[a.suit]-idx[b.suit]||b.rank-a.rank);
+}
+function sortHand(cards){return sortHandWithTrump(cards,null);}
+function cardLabel(card){return `${RANK_LABEL[card.rank]}${SUIT_INFO[card.suit].symbol}`;}
+function nextInOrder(p){return SEATS[(SEATS.indexOf(p)+1)%4];}
+function determineTrickWinner(trick,leadSuit,trumpSuit){
+  const tp=trick.filter(t=>t.card.suit===trumpSuit);
+  const pool=tp.length>0?tp:trick.filter(t=>t.card.suit===leadSuit);
+  let best=pool[0];for(const t of pool)if(t.card.rank>best.card.rank)best=t;
+  return best.player;
+}
+function getCurrentBest(trick,leadSuit,trumpSuit){
+  if(trick.length===0)return null;
+  const tp=trick.filter(t=>t.card.suit===trumpSuit);
+  const pool=tp.length>0?tp:trick.filter(t=>t.card.suit===leadSuit);
+  if(pool.length===0)return null;
+  let best=pool[0];for(const t of pool)if(t.card.rank>best.card.rank)best=t;
+  return best;
+}
+function detectBestiegen(trick) {
+  const bySuit = {};
+  trick.forEach((t, i) => {
+    if (!bySuit[t.card.suit]) bySuit[t.card.suit] = [];
+    bySuit[t.card.suit].push({ ...t, order: i });
+  });
+  const lowRank = 12, highRank = 13;
+  for (const suit of Object.keys(bySuit)) {
+    const cards = bySuit[suit];
+    const lowIdx = cards.findIndex(c => c.card.rank === lowRank);
+    const highIdx = cards.findIndex(c => c.card.rank === highRank);
+    if (lowIdx !== -1 && highIdx !== -1 && highIdx > lowIdx) {
+      return { suit, lowRank, highRank, lowPlayer: cards[lowIdx].player, highPlayer: cards[highIdx].player };
+    }
+  }
+  return null;
+}
+function detectFamilie(trick) {
+  const bySuit = {};
+  trick.forEach(t => {
+    if (!bySuit[t.card.suit]) bySuit[t.card.suit] = {};
+    bySuit[t.card.suit][t.card.rank] = t.player;
+  });
+  for (const suit of Object.keys(bySuit)) {
+    const ranks = bySuit[suit];
+    if (ranks[11] != null && ranks[12] != null && ranks[13] != null) {
+      return { suit, jackPlayer: ranks[11], queenPlayer: ranks[12], highPlayer: ranks[13] };
+    }
+  }
+  return null;
+}
+function isCardPlayable(card, hand, state) {
+  if (state.currentTrick.length===0) return true;
+  const has = hand.some(c=>c.suit===state.leadSuit);
+  if (has) return card.suit===state.leadSuit;
+  return true;
+}
+
+// ---------- Spiel-Logik ----------
+function getNextDeclarer(lastDeclarer, roundWinner) {
+  const declarerTeam = teamOf(lastDeclarer);
+  if (declarerTeam === roundWinner) return lastDeclarer;
+  return nextInOrder(lastDeclarer);
+}
+function drawRankValue(rank) { return rank === 14 ? 1 : rank; }
+function collectPlayedDeck(prevState) {
+  if (!prevState || !prevState.trickHistory || prevState.trickHistory.length === 0) {
+    return buildDeck();
+  }
+  const collected = [];
+  prevState.trickHistory.forEach(trick => {
+    trick.forEach(t => collected.push(t.card));
+  });
+  if (collected.length !== 52) return buildDeck();
+  return collected;
+}
+function dealNewGame(names, handNumber, scoreHome, scoreAway, dealer, log, declarer, prevState) {
+  const trumpDeclarer = declarer ?? dealer;
+  const collected = collectPlayedDeck(prevState);
+  const deck = prevState ? realisticShuffle(collected) : shuffle(collected);
+  const hands = {S:[],E:[],N:[],W:[]};
+  deck.forEach((card,i) => hands[SEATS[i%4]].push(card));
+  Object.keys(hands).forEach(p => { hands[p] = sortHand(hands[p]); });
+  return {
+    phase:"trumpSelect", dealer, declarer:trumpDeclarer, hands, names,
+    trumpSuit:null, currentTrick:[], leadSuit:null,
+    currentTurn:null, tricksByPlayer:{S:0,E:0,N:0,W:0}, trickNumber:0,
+    trickComplete:false, trickWinner:null, lastHandResult:null, signals:{},
+    trickHistory:[],
+    handNumber, scoreHome, scoreAway,
+    log:[...log, `Runde ${handNumber}: ${names[dealer]} gibt Karten. ${names[trumpDeclarer]} wählt Trumpf.`],
+  };
+}
+function applySelectTrump(state, suit) {
+  const declarer = state.declarer;
+  const hands = {};
+  Object.keys(state.hands).forEach(p => { hands[p] = sortHandWithTrump(state.hands[p], suit); });
+  return {
+    ...state, trumpSuit:suit, phase:"playing", hands,
+    currentTrick:[], leadSuit:null, currentTurn:declarer, trickNumber:1,
+    log:[...state.log,`${state.names[declarer]} bestimmt Trumpf: ${SUIT_INFO[suit].name} ${SUIT_INFO[suit].symbol}.`],
+  };
+}
+function applyPlayCard(state, player, card) {
+  const hands = {...state.hands, [player]:state.hands[player].filter(c=>c.id!==card.id)};
+  const currentTrick = [...state.currentTrick, {player,card}];
+  const isNewLead = state.leadSuit == null;
+  const leadSuit = state.leadSuit ?? card.suit;
+  let log = [...state.log, `${state.names[player]}: ${cardLabel(card)}`];
+  let signals = state.signals;
+  if (isNewLead) {
+    const consumed = Object.entries(signals || {}).filter(([p, sig]) =>
+      sig?.suit === leadSuit && !(p === player && sig?.cardId === card.id)
+    );
+    if (consumed.length) {
+      signals = {...signals};
+      consumed.forEach(([p]) => delete signals[p]);
+    }
+  }
+  if (currentTrick.length < 4) {
+    return {...state, hands, currentTrick, leadSuit, signals, currentTurn:nextInOrder(player), log};
+  }
+  const winner = determineTrickWinner(currentTrick, leadSuit, state.trumpSuit);
+  const tricksByPlayer = {...state.tricksByPlayer, [winner]:state.tricksByPlayer[winner]+1};
+  log = [...log, `${state.names[winner]} gewinnt Stich ${state.trickNumber}.`];
+  const familieRaw = detectFamilie(currentTrick);
+  const familie = (familieRaw && familieRaw.suit === state.trumpSuit && winner === familieRaw.highPlayer) ? familieRaw : null;
+  const bestiegenRaw = !familie ? detectBestiegen(currentTrick) : null;
+  const bestiegen = (bestiegenRaw && bestiegenRaw.suit === state.trumpSuit && winner === bestiegenRaw.highPlayer) ? bestiegenRaw : null;
+  let event = null;
+  if (familie) {
+    event = { type:"familie", suit:familie.suit, trickNumber:state.trickNumber };
+    log = [...log, `★ FAMILIE in ${SUIT_INFO[familie.suit].name}! ★`];
+  } else if (bestiegen) {
+    event = { type:"bestiegen", ...bestiegen, trickNumber:state.trickNumber };
+    log = [...log, `${RANK_LABEL[bestiegen.lowRank]} bestiegen von ${RANK_LABEL[bestiegen.highRank]} (${SUIT_INFO[bestiegen.suit].name})!`];
+  }
+  return {...state, hands, currentTrick, leadSuit, signals, tricksByPlayer, trickComplete:true, trickWinner:winner, currentTurn:null, log, pendingEvent:event, eventAcknowledged:!event};
+}
+function applyClearTrick(state) {
+  const signals = state.signals;
+  const trickHistory = [...(state.trickHistory || []), state.currentTrick];
+  const homeTricks = state.tricksByPlayer.S + state.tricksByPlayer.N;
+  const awayTricks = state.tricksByPlayer.E + state.tricksByPlayer.W;
+  const decided = homeTricks>=TARGET_TRICKS || awayTricks>=TARGET_TRICKS || state.trickNumber>=13;
+  if (decided) {
+    const winner = homeTricks>=TARGET_TRICKS?"home" : awayTricks>=TARGET_TRICKS?"away" : homeTricks>awayTricks?"home":"away";
+    const loserTricks = winner==="home" ? awayTricks : homeTricks;
+    const isSevenZero = loserTricks === 0;
+    return {
+      ...state, signals, trickHistory, phase:"handEnd", currentTrick:[], trickComplete:false, pendingEvent:null,
+      lastHandResult:{winner,homeTricks,awayTricks,isSevenZero},
+      scoreHome:state.scoreHome+(winner==="home"?1:0),
+      scoreAway:state.scoreAway+(winner==="away"?1:0),
+      log:[...state.log,`${winner==="home"?"Team Süd/Nord":"Team Ost/West"} gewinnt die Runde.`],
+    };
+  }
+  return {...state, signals, trickHistory, currentTrick:[], leadSuit:null, currentTurn:state.trickWinner, trickNumber:state.trickNumber+1, trickComplete:false, pendingEvent:null};
+}
+
+// ---------- Zentraler Aktions-Reducer ----------
+function applyGameAction(prev, seat, action) {
+  if (!prev) return prev;
+  if (action.type==="selectTrump") {
+    if (prev.phase!=="trumpSelect"||prev.declarer!==seat) return prev;
+    return applySelectTrump(prev, action.suit);
+  }
+  if (action.type==="playCard") {
+    if (prev.phase!=="playing"||prev.trickComplete||prev.currentTurn!==seat) return prev;
+    const card = (prev.hands[seat]||[]).find(c=>c.id===action.card.id);
+    if (!card) return prev;
+    if (!isCardPlayable(card,prev.hands[seat],prev)) return prev;
+    const next = applyPlayCard(prev,seat,card);
+    const sig = next.signals?.[seat];
+    if (sig && sig.cardId == null) {
+      const boundSuit = sig.type === SIGNALS.GEDREHT
+        ? (next.leadSuit ?? card.suit)
+        : card.suit;
+      return {...next, signals:{...next.signals, [seat]:{...sig, cardId:card.id, suit:boundSuit, trickNumber:prev.trickNumber}}};
+    }
+    return next;
+  }
+  if (action.type==="signal") {
+    if (prev.phase!=="playing"||prev.trickComplete) return prev;
+    const ex = prev.signals?.[seat];
+    if (ex?.type===action.signalType) {
+      const signals={...prev.signals}; delete signals[seat];
+      return {...prev,signals,log:[...prev.log,`${prev.names[seat]}: Signal zurückgenommen.`]};
+    }
+    const lastPlayed = prev.currentTrick.find(t => t.player === seat);
+    const sigSuit = action.signalType === SIGNALS.GEDREHT
+      ? (prev.leadSuit ?? lastPlayed?.card?.suit)
+      : (lastPlayed?.card?.suit ?? prev.leadSuit);
+    return {...prev,signals:{...prev.signals,[seat]:{type:action.signalType,suit:sigSuit,cardId:lastPlayed?.card?.id,trickNumber:prev.trickNumber}},
+      log:[...prev.log,`${prev.names[seat]}: ${SIGNAL_INFO[action.signalType].emoji} ${SIGNAL_INFO[action.signalType].label}`]};
+  }
+  if (action.type==="acknowledgeEvent") {
+    if (!prev.pendingEvent) return prev;
+    return {...prev, eventAcknowledged:true};
+  }
+  if (action.type==="clearTrick") {
+    if (!prev.trickComplete) return prev;
+    return applyClearTrick(prev);
+  }
+  if (action.type==="nextHand") {
+    if (prev.phase!=="handEnd") return prev;
+    const rw=prev.lastHandResult?.winner;
+    const nd=rw?getNextDeclarer(prev.declarer,rw):nextInOrder(prev.dealer);
+    return dealNewGame(prev.names,prev.handNumber+1,prev.scoreHome,prev.scoreAway,nextInOrder(prev.dealer),prev.log,nd,prev);
+  }
+  return prev;
+}
+
+// ---------- Animationen ----------
+function useSignalAnimation(signalType) {
+  const [frame, setFrame] = useState(0);
+  const rafRef = useRef(null);
+  const startRef = useRef(null);
+  const prevTypeRef = useRef(null);
+  useEffect(() => {
+    if (!signalType) { setFrame(0); prevTypeRef.current = null; return; }
+    if (signalType === prevTypeRef.current) return;
+    prevTypeRef.current = signalType;
+    startRef.current = null;
+    const duration = signalType === SIGNALS.FESTE ? 500 : 650;
+    const animate = (ts) => {
+      if (!startRef.current) startRef.current = ts;
+      const p = Math.min((ts - startRef.current) / duration, 1);
+      setFrame(p);
+      if (p < 1) rafRef.current = requestAnimationFrame(animate);
+      else setFrame(0);
+    };
+    rafRef.current = requestAnimationFrame(animate);
+    return () => { if(rafRef.current) cancelAnimationFrame(rafRef.current); };
+  }, [signalType]);
+  return frame;
+}
+
+// ---------- UI-Bausteine ----------
+function CardFace({ card, clickable, dim, onClick, highlight, asDiv }) {
+  const info = SUIT_INFO[card.suit];
+  const Tag = asDiv ? "div" : "button";
+  const extraProps = asDiv ? {} : { onClick: clickable ? onClick : undefined, disabled: !clickable };
+  return (
+    <Tag
+      {...extraProps}
+      style={{
+        width:58, height:80, borderRadius:PXR, flexShrink:0,
+        border:`3px solid ${COLORS.outline}`,
+        background: COLORS.cardFace,
+        color:info.textColor, opacity:dim?0.35:1,
+        display:"flex", flexDirection:"column", justifyContent:"space-between",
+        padding:"3px 5px", cursor:clickable?"pointer":"default",
+        boxShadow: highlight
+          ? hardShadow(3,3,COLORS.goldLight)
+          : hardShadow(3,3,COLORS.outline),
+        transform:"translate(0,0)", transition:"transform 0.08s steps(3), box-shadow 0.08s steps(3)",
+        imageRendering:"pixelated",
+      }}
+      onMouseEnter={e=>{ if(clickable){ e.currentTarget.style.transform="translate(-2px,-4px)"; e.currentTarget.style.boxShadow=hardShadow(5,7,highlight?COLORS.goldLight:info.color); } }}
+      onMouseLeave={e=>{ e.currentTarget.style.transform="translate(0,0)"; e.currentTarget.style.boxShadow=highlight?hardShadow(3,3,COLORS.goldLight):hardShadow(3,3,COLORS.outline); }}
+    >
+      <span style={{fontSize:16,fontWeight:900,lineHeight:1,textAlign:"left",fontFamily:PIXEL_FONT}}>{RANK_LABEL[card.rank]}</span>
+      <span style={{fontSize:24,lineHeight:1,textAlign:"center"}}>{info.symbol}</span>
+      <span style={{fontSize:16,fontWeight:900,lineHeight:1,textAlign:"right",transform:"rotate(180deg)",fontFamily:PIXEL_FONT}}>{RANK_LABEL[card.rank]}</span>
+    </Tag>
+  );
+}
+const Z = { TABLE:1, SIGNAL_BADGE:5, HAND_REST:10, HAND_PRESS:600, HAND_DRAG:900, MODAL:2000 };
+
+function DraggableHandCard({ card, clickable, dim, onPlay, highlight }) {
+  const [pressed, setPressed] = useState(false);
+  const buzz = (ms) => { try { navigator.vibrate?.(ms); } catch {} };
+  const onPointerDown = () => { if (clickable) setPressed(true); };
+  const onPointerUp = () => setPressed(false);
+  const handleClick = () => {
+    if (!clickable) return;
+    buzz(18);
+    onPlay();
+  };
+  return (
+    <div
+      onPointerDown={onPointerDown}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+      onPointerLeave={onPointerUp}
+      style={{
+        position:"relative",
+        touchAction: "pan-x",
+        zIndex: pressed ? Z.HAND_PRESS : Z.HAND_REST,
+        transform: pressed ? "scale(1.22) translateY(-14px)" : "scale(1)",
+        transition: "transform 0.15s ease-out",
+        filter: pressed ? `drop-shadow(0 6px 10px rgba(0,0,0,0.5))` : "none",
+      }}
+    >
+      <CardFace card={card} clickable={clickable} dim={dim} onClick={handleClick} highlight={pressed ? true : highlight}/>
+    </div>
+  );
+}
+function CardBack() {
+  return (
+    <div style={{
+      width:40, height:54, borderRadius:PXR, flexShrink:0,
+      border:`3px solid ${COLORS.outline}`,
+      background: COLORS.cardBack,
+      boxShadow: hardShadow(2,2,COLORS.outline),
+      backgroundImage:`repeating-linear-gradient(45deg, ${COLORS.goldLight}2e 0px, ${COLORS.goldLight}2e 4px, transparent 4px, transparent 8px)`,
+    }}/>
+  );
+}
+const TRICK_ANIM = {
+  enter:               { dur:"0.3s",  ease:"cubic-bezier(0.22,1,0.36,1)" },
+  [SIGNALS.GEDREHT]:   { dur:"0.62s", ease:"cubic-bezier(0.16,1,0.3,1)" },
+  [SIGNALS.FESTE]:     { dur:"0.42s", ease:"cubic-bezier(0.34,1.56,0.64,1)" },
+};
+function TrickCell({ play, seat, signal }) {
+  const prevCardIdRef = useRef(null);
+  const lastSignalKeyRef = useRef(null);
+  const [animKey, setAnimKey] = useState(0);
+  const [variant, setVariant] = useState("enter");
+  useEffect(() => {
+    if (!play) {
+      prevCardIdRef.current = null;
+      lastSignalKeyRef.current = null;
+      return;
+    }
+    const isNewCard = play.card.id !== prevCardIdRef.current;
+    const matches = signal && signal.cardId === play.card.id;
+    const signalKey = matches ? `${signal.type}:${signal.cardId}` : null;
+    const shouldReplay = isNewCard || (signalKey && signalKey !== lastSignalKeyRef.current);
+    if (!shouldReplay) return;
+    prevCardIdRef.current = play.card.id;
+    lastSignalKeyRef.current = signalKey;
+    setVariant(matches ? signal.type : "enter");
+    setAnimKey(k => k + 1);
+  }, [play, signal]);
+  const cfg = TRICK_ANIM[variant] || TRICK_ANIM.enter;
+  const animName = `cardAnim-${seat}-${variant}`;
+  return (
+    <div style={{width:50,height:70,display:"flex",alignItems:"center",justifyContent:"center"}}>
+      {play ? (
+        <div key={animKey} style={{ animation: `${animName} ${cfg.dur} ${cfg.ease} both` }}>
+          <CardFace card={play.card} clickable={false}/>
+        </div>
+      ) : (
+        <div style={{width:50,height:70,borderRadius:PXR,border:`3px dashed ${COLORS.neonPurple}33`}}/>
+      )}
+    </div>
+  );
+}
+function SignalBadge({ signal, hidden }) {
+  const frame = useSignalAnimation(!hidden ? signal?.type : null);
+  if (!signal || hidden) return null;
+  const info = SIGNAL_INFO[signal.type];
+  let emojiTransform = "scale(1) rotate(0deg)";
+  if (frame > 0 && frame < 1) {
+    if (signal.type === SIGNALS.FESTE) {
+      const shakeX = Math.sin(frame * Math.PI * 5) * 4;
+      const shakeR = Math.sin(frame * Math.PI * 4) * 15;
+      const scl = 1 + Math.sin(frame * Math.PI) * 0.4;
+      emojiTransform = `translateX(${shakeX}px) rotate(${shakeR}deg) scale(${scl})`;
+    } else {
+      const deg = frame * 360;
+      const scl = 1 + Math.sin(frame * Math.PI) * 0.5;
+      emojiTransform = `rotate(${deg}deg) scale(${scl})`;
+    }
+  }
+  const now = Date.now();
+  const pulse = 0.85 + 0.15 * Math.sin(now / 700 + (signal.type === SIGNALS.FESTE ? 0 : 1.5));
+  return (
+    <div style={{
+      fontSize:17, fontWeight:900, padding:"5px 10px", borderRadius:PXR, marginTop:4,
+      background:COLORS.gold, border:`3px solid ${COLORS.outline}`,
+      color:COLORS.outline, display:"flex", alignItems:"center", gap:5,
+      boxShadow:`${hardShadow(3,3,COLORS.outline)}, 0 0 ${10*pulse}px rgba(255,198,64,${0.7*pulse})`,
+      fontFamily:PIXEL_FONT, letterSpacing:0.5, whiteSpace:"nowrap",
+      transform:`scale(${pulse})`,
+    }}>
+      <span style={{display:"inline-block", fontSize:20, transform:emojiTransform, transition:frame>0&&frame<1?"none":"transform 0.1s"}}>{info.emoji}</span>
+      {info.short}
+    </div>
+  );
+}
+function PulsingSignalBadge({ signal, hidden }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!signal || hidden) return;
+    const id = setInterval(() => setTick(t => t+1), 80);
+    return () => clearInterval(id);
+  }, [signal?.type, hidden]);
+  return <SignalBadge signal={signal} hidden={hidden}/>;
+}
+function PlayerSlot({ name, count, active, signal, signalHidden, isMe, isBot }) {
+  return (
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:3,flexShrink:0,
+      transition:"transform 0.1s steps(2)", transform:active?"scale(1.08)":"scale(1)"}}>
+      <div style={{
+        fontSize:13, fontWeight:900, padding:"3px 9px", borderRadius:PXR,
+        background: active ? COLORS.gold : isMe ? COLORS.panel : COLORS.panelDark,
+        color: active ? COLORS.outline : isMe ? COLORS.goldLight : COLORS.cream,
+        border: `2px solid ${active ? COLORS.outline : isMe ? COLORS.gold : "#3a2f60"}`,
+        boxShadow: hardShadow(2,2,COLORS.outline),
+        letterSpacing:0.5, whiteSpace:"nowrap", fontFamily:PIXEL_FONT,
+      }}>{isBot?"🤖 ":""}{name}{isMe?" ✦":""}</div>
+      <div style={{display:"flex",alignItems:"center",gap:5}}>
+        <div style={{
+          width:20, height:28, borderRadius:2, flexShrink:0,
+          border:`2px solid ${active?COLORS.gold:"#3a2f60"}`,
+          background:COLORS.cardBack,
+          backgroundImage:`repeating-linear-gradient(45deg,${COLORS.neonPurple}33 0px,${COLORS.neonPurple}33 3px,transparent 3px,transparent 6px)`,
+        }}/>
+        <span style={{fontSize:16,fontWeight:900,opacity:active?1:0.6,color:active?COLORS.goldLight:COLORS.cream,fontFamily:PIXEL_FONT}}>{count}</span>
+      </div>
+      <PulsingSignalBadge signal={signal} hidden={signalHidden}/>
+    </div>
+  );
+}
+function SheetWrapper({ title, children }) {
+  return (
+    <div style={{position:"fixed",inset:0,zIndex:50,display:"flex",alignItems:"flex-end",justifyContent:"center",background:"rgba(8,5,18,0.7)"}}>
+      <div style={{
+        width:"100%",maxWidth:384,borderRadius:`${PXR*2}px ${PXR*2}px 0 0`,padding:18,paddingBottom:28,
+        background:COLORS.panel,
+        border:`3px solid ${COLORS.neonPurple}`, borderBottom:"none",
+        boxShadow:`0 -4px 0px ${COLORS.outline}`,
+      }}>
+        {title && <h3 style={{fontSize:17,fontWeight:900,marginBottom:12,color:COLORS.goldLight,fontFamily:PIXEL_FONT,letterSpacing:1}}>{title}</h3>}
+        {children}
+      </div>
+    </div>
+  );
+}
+function SignalButton({ type, isActive, onClick }) {
+  const info = SIGNAL_INFO[type];
+  return (
+    <button onClick={onClick} style={{
+      flex:1, padding:"13px 4px", minHeight:44, borderRadius:PXR, fontSize:15, fontWeight:900,
+      display:"flex", alignItems:"center", justifyContent:"center",
+      background: isActive ? COLORS.gold : COLORS.panelDark,
+      border: `2px solid ${isActive ? COLORS.outline : "#3a2f60"}`,
+      color: isActive ? COLORS.outline : COLORS.cream,
+      boxShadow: hardShadow(2,2,COLORS.outline),
+      transform: isActive ? "translate(-1px,-1px)" : "translate(0,0)",
+      transition:"background 0.1s, color 0.1s, transform 0.08s steps(2)",
+      cursor:"pointer", fontFamily:PIXEL_FONT, letterSpacing:0.3,
+    }}>
+      <span style={{display:"inline-block", marginRight:4}}>{info.emoji}</span>
+      {info.label}
+    </button>
+  );
+}
+function TrumpPicker({ onPick, onRandom, previewCards }) {
+  return (
+    <SheetWrapper title="TRUMPF WÄHLEN">
+      <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",marginBottom:8}}>
+        <button onClick={onRandom} style={{fontSize:13,padding:"8px 10px",minHeight:36,borderRadius:PXR,background:COLORS.panel,color:COLORS.cream,border:`2px solid #3a2f60`,cursor:"pointer",display:"flex",alignItems:"center",gap:4,fontFamily:PIXEL_FONT,fontWeight:700}}>
+          <Shuffle size={12}/> ZUFALL
+        </button>
+      </div>
+      <div style={{display:"flex",gap:4,marginBottom:14,overflowX:"auto",paddingBottom:2,height:56}}>
+        {previewCards.map(card=>
+          <div key={card.id} style={{transform:"scale(0.78)",transformOrigin:"top left",flexShrink:0,width:39,height:56}}>
+            <CardFace card={card} clickable={false}/>
+          </div>
+        )}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6}}>
+        {SUIT_KEYS.map(s=>{
+          const col = SUIT_INFO[s].textColor;
+          return (
+            <button key={s} onClick={()=>onPick(s)} style={{
+              padding:"9px 4px",borderRadius:PXR,display:"flex",flexDirection:"column",alignItems:"center",
+              fontWeight:900,background:COLORS.cardFace,color:col,cursor:"pointer",
+              border:`3px solid ${COLORS.outline}`,gap:2,
+              boxShadow:hardShadow(2,2,COLORS.outline),
+              transition:"transform 0.08s steps(2)",
+            }}
+            onMouseEnter={e=>{e.currentTarget.style.transform="translate(-1px,-2px)";}}
+            onMouseLeave={e=>{e.currentTarget.style.transform="translate(0,0)";}}>
+              <span style={{fontSize:26,lineHeight:1}}>{SUIT_INFO[s].symbol}</span>
+              <span style={{fontSize:12,lineHeight:1,fontFamily:PIXEL_FONT}}>{SUIT_INFO[s].name}</span>
+            </button>
+          );
+        })}
+      </div>
+    </SheetWrapper>
+  );
+}
+function HandEndModal({ state, onNext, mySeat, canAdvance, hostName }) {
+  const N = state.names;
+  const r = state.lastHandResult;
+  const myTeam = teamOf(mySeat);
+  const iWon = r.winner === myTeam;
+  const nextDeclarer = getNextDeclarer(state.declarer, r.winner);
+  const declarerKept = nextDeclarer === state.declarer;
+  const taunt = useState(() => SEVEN_ZERO_TAUNTS[Math.floor(Math.random()*SEVEN_ZERO_TAUNTS.length)])[0];
+  return (
+    <SheetWrapper title="★ RUNDENERGEBNIS ★">
+      <p style={{fontSize:16,marginBottom:4,color:COLORS.cream}}>Trumpf war {SUIT_INFO[state.trumpSuit].name} {SUIT_INFO[state.trumpSuit].symbol} ({N[state.declarer]} hatte bestimmt).</p>
+      <p style={{fontSize:16,marginBottom:8,color:COLORS.cream}}>Stiche: {N.S}&{N.N} {r.homeTricks} – {N.E}&{N.W} {r.awayTricks}</p>
+      <p style={{fontSize:18,fontWeight:900,marginBottom:8,fontFamily:PIXEL_FONT,
+        color:iWon?COLORS.neonGreen:COLORS.redAccent}}>{iWon?"✦ DEIN TEAM GEWINNT! ✦":"GEGNER GEWINNEN!"}</p>
+      {r.isSevenZero && (
+        <div style={{
+          marginBottom:12, padding:"10px 12px", borderRadius:PXR,
+          background: iWon ? `${COLORS.neonGreen}22` : `${COLORS.redAccent}22`,
+          border:`3px solid ${iWon ? COLORS.neonGreen : COLORS.redAccent}`,
+          boxShadow:hardShadow(2,2,COLORS.outline),
+        }}>
+          <div style={{fontSize:15,fontWeight:900,marginBottom:4,color:iWon?COLORS.neonGreen:COLORS.redAccent,letterSpacing:0.5}}>
+            ⚡ SIEBEN ZU NULL! ⚡
+          </div>
+          <div style={{fontSize:15,color:COLORS.cream,lineHeight:1.5}}>{taunt}</div>
+        </div>
+      )}
+      <p style={{fontSize:16,fontWeight:900,marginBottom:8,color:COLORS.goldLight,fontFamily:PIXEL_FONT}}>Stand: {N.S}&{N.N} {state.scoreHome} : {state.scoreAway} {N.E}&{N.W}</p>
+      <p style={{fontSize:15,opacity:0.85,marginBottom:16,padding:"8px 10px",borderRadius:PXR,background:COLORS.panelDark,border:`2px solid #3a2f60`,color:COLORS.cream}}>
+        Nächste Runde: <strong style={{color:declarerKept?COLORS.goldLight:COLORS.cream}}>{N[nextDeclarer]}</strong> wählt den Trumpf
+        {declarerKept ? " (hat gewonnen)" : " (rechts vom letzten Bestimmer)"}
+      </p>
+      {canAdvance ? (
+        <button onClick={onNext} style={{
+          width:"100%",padding:"14px 0",minHeight:48,borderRadius:PXR,fontWeight:900,
+          display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+          background:COLORS.gold,color:COLORS.outline,
+          border:`3px solid ${COLORS.outline}`,cursor:"pointer",fontSize:16,
+          fontFamily:PIXEL_FONT,letterSpacing:0.5,
+          boxShadow:hardShadow(3,3,COLORS.outline),
+        }}>
+          NÄCHSTE RUNDE <ChevronRight size={16}/>
+        </button>
+      ) : (
+        <div style={{
+          width:"100%",padding:"14px 0",minHeight:48,borderRadius:PXR,fontWeight:900,
+          display:"flex",alignItems:"center",justifyContent:"center",
+          background:COLORS.panelDark,color:COLORS.cream,opacity:0.7,
+          border:`2px dashed #3a2f60`,fontSize:14,fontFamily:PIXEL_FONT,letterSpacing:0.5,
+        }}>
+          WARTE AUF {hostName?.toUpperCase() || "HOST"} …
+        </div>
+      )}
+    </SheetWrapper>
+  );
+}
+function EventPopup({ event, onDismiss }) {
+  const [sentence] = useState(() => {
+    if (!event) return "";
+    if (event.type === "familie") {
+      const t = FAMILIE_TAUNTS[Math.floor(Math.random()*FAMILIE_TAUNTS.length)];
+      return t.replace("{suit}", `${SUIT_INFO[event.suit].name} ${SUIT_INFO[event.suit].symbol}`);
+    }
+    return BESTIEGEN_TAUNTS[Math.floor(Math.random()*BESTIEGEN_TAUNTS.length)];
+  });
+  if (!event) return null;
+  const isFamilie = event.type === "familie";
+  const accentColor = isFamilie ? COLORS.goldLight : SUIT_INFO[event.suit].color;
+  return (
+    <div style={{
+      position:"fixed", inset:0, zIndex:60, display:"flex",
+      alignItems:"center", justifyContent:"center",
+      background:"rgba(8,5,18,0.55)",
+    }}>
+      <div style={{
+        maxWidth:320, width:"88%", padding:"20px 18px", borderRadius:PXR*2,
+        background:COLORS.panel, border:`4px solid ${accentColor}`,
+        boxShadow:hardShadow(5,5,COLORS.outline),
+        textAlign:"center", animation:"popIn 0.25s steps(4) both",
+      }}>
+        <div style={{fontSize:14,fontWeight:900,letterSpacing:2,marginBottom:8,color:accentColor,fontFamily:PIXEL_FONT}}>
+          {isFamilie ? "★ FAMILIE ★" : "⚔ BESTIEGEN ⚔"}
+        </div>
+        {!isFamilie && (
+          <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:10,marginBottom:10}}>
+            <CardFace card={{suit:event.suit,rank:event.lowRank,id:"preview-low"}} clickable={false}/>
+            <span style={{fontSize:22,color:accentColor,fontWeight:900}}>→</span>
+            <CardFace card={{suit:event.suit,rank:event.highRank,id:"preview-high"}} clickable={false} highlight/>
+          </div>
+        )}
+        {isFamilie && (
+          <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,marginBottom:10}}>
+            <CardFace card={{suit:event.suit,rank:11,id:"preview-j"}} clickable={false}/>
+            <CardFace card={{suit:event.suit,rank:12,id:"preview-q"}} clickable={false}/>
+            <CardFace card={{suit:event.suit,rank:13,id:"preview-k"}} clickable={false} highlight/>
+          </div>
+        )}
+        <p style={{fontSize:16,color:COLORS.cream,lineHeight:1.6,margin:"0 0 16px"}}>{sentence}</p>
+        <button onClick={onDismiss} style={{
+          width:"100%",padding:"14px 0",minHeight:48,borderRadius:PXR,fontWeight:900,fontSize:16,
+          background:accentColor,color:COLORS.outline,border:`3px solid ${COLORS.outline}`,
+          cursor:"pointer",fontFamily:PIXEL_FONT,letterSpacing:0.5,
+          boxShadow:hardShadow(3,3,COLORS.outline),
+        }}>
+          WEITER
+        </button>
+      </div>
+    </div>
+  );
+}
+function RulesModal({ onClose, names }) {
+  const N = names || {};
+  return (
+    <div style={{position:"fixed",inset:0,zIndex:50,display:"flex",alignItems:"flex-end",justifyContent:"center",background:"rgba(0,0,0,0.6)"}}>
+      <div style={{width:"100%",maxWidth:384,borderRadius:`${PXR*2}px ${PXR*2}px 0 0`,padding:16,paddingBottom:24,
+        background:COLORS.panel,border:`3px solid ${COLORS.neonPurple}`,borderBottom:"none",
+        boxShadow:`0 -4px 0px ${COLORS.outline}`,
+        maxHeight:"80vh",overflowY:"auto"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+          <h3 style={{fontSize:17,fontWeight:900,color:COLORS.goldLight,fontFamily:PIXEL_FONT,letterSpacing:1}}>REGELN</h3>
+          <button onClick={onClose} style={{background:COLORS.panelDark,border:`2px solid #3a2f60`,color:COLORS.cream,cursor:"pointer",width:40,height:40,borderRadius:PXR,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><X size={18}/></button>
+        </div>
+        <ul style={{fontSize:16,paddingLeft:16,opacity:0.9,marginBottom:16,display:"flex",flexDirection:"column",gap:8,color:COLORS.cream}}>
+          <li>4 Spieler, 2 Teams – {N.S||"S"} & {N.N||"N"} gegen {N.E||"E"} & {N.W||"W"}.</li>
+          <li>Jeder bekommt 13 Karten. Rangfolge: A, K, D, B, 10 … 2.</li>
+          <li>Der Trumpf-Bestimmer sieht zunächst nur 5 seiner 13 Karten und wählt damit die Trumpffarbe. Danach werden alle 13 sichtbar.</li>
+          <li>Der Kartengeber spielt als Erster aus.</li>
+          <li>Farbe muss bedient werden. Sonst darf mit Trumpf gestochen werden.</li>
+          <li>Sobald ein Team {TARGET_TRICKS} Stiche hat, gewinnt es die Runde.</li>
+        </ul>
+        <h4 style={{fontSize:15,fontWeight:900,marginBottom:8,color:COLORS.goldLight,fontFamily:PIXEL_FONT,letterSpacing:1}}>SIGNALE</h4>
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {Object.values(SIGNALS).map(type=>{
+            const info=SIGNAL_INFO[type];
+            return (
+              <div key={type} style={{borderRadius:PXR,padding:10,background:COLORS.panelDark,border:`2px solid ${info.color}`,boxShadow:hardShadow(2,2,COLORS.outline)}}>
+                <div style={{fontWeight:900,fontSize:16,marginBottom:2,color:info.color}}>{info.emoji} {info.label}</div>
+                <div style={{fontSize:15,opacity:0.8,color:COLORS.cream}}>{info.meaning}</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+function SignalLegendDropdown() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{position:"relative"}}>
+      <button onClick={()=>setOpen(v=>!v)} style={{display:"flex",alignItems:"center",gap:4,fontSize:14,padding:"9px 10px",minHeight:40,borderRadius:PXR,background:COLORS.panel,color:COLORS.cream,border:`2px solid #3a2f60`,cursor:"pointer",fontFamily:PIXEL_FONT,fontWeight:700,boxShadow:hardShadow(2,2,COLORS.outline)}}>
+        SIGNALE <ChevronDown size={13} style={{transform:open?"rotate(180deg)":"none"}}/>
+      </button>
+      {open && (
+        <div style={{position:"absolute",right:0,top:44,zIndex:30,borderRadius:PXR,padding:12,width:"min(260px, 78vw)",
+          boxShadow:hardShadow(4,4,COLORS.outline),background:COLORS.panel,border:`3px solid ${COLORS.neonPurple}`}}>
+          <div style={{fontSize:13,fontWeight:900,marginBottom:8,color:COLORS.goldLight,fontFamily:PIXEL_FONT,letterSpacing:0.5}}>SIGNAL-BEDEUTUNG</div>
+          {Object.values(SIGNALS).map(type=>{
+            const info=SIGNAL_INFO[type];
+            return (
+              <div key={type} style={{marginBottom:6,borderRadius:PXR,padding:8,background:COLORS.panelDark,border:`2px solid ${info.color}`}}>
+                <div style={{fontWeight:900,fontSize:15,marginBottom:2,color:info.color}}>{info.emoji} {info.label}</div>
+                <div style={{fontSize:14,opacity:0.75,color:COLORS.cream}}>{info.meaning}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Screen-Hülle ----------
+function ScreenShell({ children }) {
+  return (
+    <div style={{minHeight:"100vh",minHeight:"100dvh",maxWidth:430,margin:"0 auto",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
+      background:COLORS.bg2,color:COLORS.cream,fontFamily:PIXEL_FONT,padding:"24px 20px",boxSizing:"border-box",
+      backgroundImage:`repeating-linear-gradient(0deg, ${COLORS.bg} 0px, ${COLORS.bg} 22px, ${COLORS.bg2} 22px, ${COLORS.bg2} 44px)`,
+    }}>
+      <style>{`html,body{touch-action:manipulation;-webkit-tap-highlight-color:transparent;}`}</style>
+      {children}
+    </div>
+  );
+}
+function TitleBadge({ subtitle }) {
+  return (
+    <React.Fragment>
+      <div style={{
+        padding:"10px 24px", marginBottom:8, borderRadius:PXR*2,
+        background:COLORS.panel, border:`4px solid ${COLORS.outline}`,
+        boxShadow: hardShadow(4,4,COLORS.neonPurple),
+      }}>
+        <h1 style={{fontSize:26,fontWeight:900,letterSpacing:3,color:COLORS.goldLight,margin:0,textAlign:"center",textShadow:`2px 2px 0px ${COLORS.outline}`}}>
+          YAMA GAME
+        </h1>
+      </div>
+      {subtitle && <p style={{fontSize:12,opacity:0.4,marginBottom:22,textAlign:"center",letterSpacing:2,fontFamily:PIXEL_FONT}}>{subtitle}</p>}
+    </React.Fragment>
+  );
+}
+function BigButton({ children, onClick, color=COLORS.gold, disabled }) {
+  return (
+    <button onClick={onClick} disabled={disabled} style={{
+      width:"100%",padding:"15px 0",minHeight:52,borderRadius:PXR,fontWeight:900,fontSize:16,
+      display:"flex",alignItems:"center",justifyContent:"center",gap:8,
+      background: disabled ? COLORS.panelDark : color, color: disabled ? "#4a4070" : COLORS.outline,
+      border:`3px solid ${COLORS.outline}`,cursor:disabled?"not-allowed":"pointer",
+      fontFamily:PIXEL_FONT,letterSpacing:0.5,
+      boxShadow: disabled ? "none" : hardShadow(3,3,COLORS.outline),
+    }}>{children}</button>
+  );
+}
+
+// ---------- Persona-Auswahl ----------
+function PersonaSelectScreen({ onSelect, takenPersonas = [], subtitle = "WÄHLE DEINE PERSONA", onBack }) {
+  const [hovered, setHovered] = useState(null);
+  return (
+    <ScreenShell>
+      <TitleBadge subtitle={subtitle}/>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,width:"100%",maxWidth:340}}>
+        {PERSONAS.map(name => {
+          const taken = takenPersonas.includes(name);
+          const isHover = hovered===name && !taken;
+          return (
+            <button key={name} onClick={()=>!taken&&onSelect(name)}
+              onMouseEnter={() => !taken&&setHovered(name)}
+              onMouseLeave={() => setHovered(null)}
+              style={{
+                padding:"14px 4px",minHeight:44,borderRadius:PXR,fontWeight:700,fontSize:15,
+                background: taken ? COLORS.panelDark : isHover ? COLORS.gold : COLORS.panel,
+                border:`2px solid ${taken?"#2a2348":isHover?COLORS.outline:"#3a2f60"}`,
+                color: taken?"#4a4070":isHover?COLORS.outline:COLORS.cream,
+                cursor:taken?"not-allowed":"pointer",
+                transition:"transform 0.08s steps(2)",
+                boxShadow: taken ? "none" : hardShadow(2,2,COLORS.outline),
+                transform: isHover ? "translate(-1px,-1px)" : "translate(0,0)",
+                letterSpacing:0.5, fontFamily:PIXEL_FONT,
+              }}
+            >
+              {name}
+            </button>
+          );
+        })}
+      </div>
+      {onBack && (
+        <button onClick={onBack} style={{marginTop:18,fontSize:13,padding:"10px 16px",borderRadius:PXR,background:COLORS.panelDark,color:COLORS.cream,border:`2px solid #3a2f60`,cursor:"pointer",fontFamily:PIXEL_FONT,fontWeight:700}}>
+          ← ZURÜCK
+        </button>
+      )}
+    </ScreenShell>
+  );
+}
+
+// ---------- Hand-Scrollbar ----------
+function HandScrollbar({ scrollRef, deps }) {
+  const [thumb, setThumb] = useState({ w:1, x:0 });
+  const [pressed, setPressed] = useState(false);
+  const dragRef = useRef(null);
+  const update = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const { scrollLeft, scrollWidth, clientWidth } = el;
+    if (scrollWidth <= clientWidth + 1) { setThumb({ w:1, x:0 }); return; }
+    const w = Math.max(0.14, clientWidth/scrollWidth);
+    const maxScroll = scrollWidth - clientWidth;
+    const x = maxScroll > 0 ? (scrollLeft/maxScroll) * (1-w) : 0;
+    setThumb({ w, x });
+  }, [scrollRef]);
+  useEffect(() => {
+    update();
+    const el = scrollRef.current;
+    if (!el) return;
+    el.addEventListener("scroll", update, { passive:true });
+    window.addEventListener("resize", update);
+    return () => { el.removeEventListener("scroll", update); window.removeEventListener("resize", update); };
+  }, [update, deps]);
+  if (thumb.w >= 1) return null;
+  const onPointerDown = (e) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    setPressed(true);
+    dragRef.current = { startX:e.clientX, startScroll:el.scrollLeft, trackWidth:e.currentTarget.clientWidth };
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+  };
+  const onPointerMove = (e) => {
+    const el = scrollRef.current;
+    if (!el || !dragRef.current) return;
+    const { startX, startScroll, trackWidth } = dragRef.current;
+    const maxScroll = el.scrollWidth - el.clientWidth;
+    const delta = ((e.clientX-startX)/trackWidth) * el.scrollWidth;
+    el.scrollLeft = Math.max(0, Math.min(maxScroll, startScroll + delta));
+  };
+  const onPointerUp = () => { setPressed(false); dragRef.current = null; };
+  return (
+    <div
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+      style={{ padding:"2px 4px 4px", cursor:"pointer", touchAction:"none" }}
+    >
+      <div style={{
+        position:"relative", height: pressed ? 8 : 4, width:"100%",
+        background:"rgba(255,255,255,0.08)", borderRadius:4,
+        transition:"height 0.15s ease-out",
+      }}>
+        <div style={{
+          position:"absolute", top:0, left:`${thumb.x*100}%`, width:`${thumb.w*100}%`, height:"100%",
+          background: pressed ? COLORS.goldLight : "rgba(245,240,255,0.35)",
+          borderRadius:4, transition: pressed ? "background 0.15s" : "background 0.15s, left 0.08s ease-out",
+        }}/>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Haupt-Game-View ----------
+function GameView({ gameState, mySeat, onAction, onNewGame, myHand, canAdvanceHand=true, hostName, botSeats=[], roomCode, connState }) {
+  const [showRules, setShowRules] = useState(false);
+  const [confirmRestart, setConfirmRestart] = useState(false);
+  const [activeEvent, setActiveEvent] = useState(null);
+  const shownEventKeyRef = useRef(null);
+  const handScrollRef = useRef(null);
+
+  const state = gameState;
+  const N = state.names || {};
+
+  useEffect(() => {
+    if (!state.pendingEvent) return;
+    const key = `${state.handNumber}-${state.trickNumber}-${state.pendingEvent.type}-${state.pendingEvent.suit}`;
+    if (shownEventKeyRef.current === key) return;
+    shownEventKeyRef.current = key;
+    const t = setTimeout(() => setActiveEvent(state.pendingEvent), 550);
+    return () => clearTimeout(t);
+  }, [state.pendingEvent, state.handNumber, state.trickNumber]);
+
+  const displayHands = {...state.hands};
+  if (myHand) displayHands[mySeat] = myHand;
+  const countFor = (seat) => displayHands[seat] ? displayHands[seat].length : (state.handCounts?.[seat] ?? 0);
+  const findPlay = (seat) => state.currentTrick.find(t=>t.player===seat);
+  const homeTricks = state.tricksByPlayer.S + state.tricksByPlayer.N;
+  const awayTricks = state.tricksByPlayer.E + state.tricksByPlayer.W;
+  const signals = state.signals || {};
+  const isSignalPlayed = (seat) => {
+    const sig = signals[seat];
+    if (!sig?.cardId) return false;
+    const hand = displayHands[seat] || [];
+    return !hand.some(c => c.id === sig.cardId);
+  };
+
+  const [tableShake, setTableShake] = useState(false);
+  const shakeKeyRef = useRef(null);
+  useEffect(() => {
+    let hitCardId = null;
+    for (const seat of SEATS) {
+      const p = state.currentTrick.find(t => t.player === seat);
+      const sig = signals[seat];
+      if (p && sig?.type === SIGNALS.FESTE && sig.cardId === p.card.id) { hitCardId = sig.cardId; break; }
+    }
+    const key = hitCardId ? `${state.handNumber}-${state.trickNumber}-${hitCardId}` : null;
+    if (key && key !== shakeKeyRef.current) {
+      shakeKeyRef.current = key;
+      setTableShake(true);
+      const t = setTimeout(() => setTableShake(false), 380);
+      return () => clearTimeout(t);
+    }
+  }, [state.currentTrick, signals, state.handNumber, state.trickNumber]);
+
+  const isMyTurn = state.phase==="playing" && state.currentTurn===mySeat && !state.trickComplete;
+  const canSignal = state.phase==="playing" && !state.trickComplete;
+  const mySignal = signals[mySeat];
+  const myCards = displayHands[mySeat] || [];
+  const isPreDeclareForMe = state.phase==="trumpSelect" && state.declarer===mySeat;
+  const visibleCount = isPreDeclareForMe ? Math.min(5, myCards.length) : myCards.length;
+  const shownCards = myCards.slice(0, visibleCount);
+
+  const seatOrder = ["S","E","N","W"];
+  const myIdx = seatOrder.indexOf(mySeat);
+  const [bottom, right, top, left] = [0,1,2,3].map(i=>seatOrder[(myIdx+i)%4]);
+
+  let statusText = "";
+  if (state.phase==="trumpSelect") {
+    statusText = state.declarer===mySeat ? "Wähle Trumpffarbe" : `${N[state.declarer]} wählt Trumpf …`;
+  } else if (state.phase==="playing") {
+    statusText = state.trickComplete
+      ? `${N[state.trickWinner]} gewinnt den Stich`
+      : state.currentTurn===mySeat ? "Du bist dran!" : `${N[state.currentTurn]} spielt …`;
+  }
+
+  return (
+    <div style={{
+      position:"fixed", inset:0,
+      display:"flex", flexDirection:"column",
+      background:COLORS.bg2,
+      color:COLORS.cream, fontFamily:PIXEL_FONT,
+      userSelect:"none", WebkitUserSelect:"none", overflow:"hidden",
+      overscrollBehavior:"none", touchAction:"manipulation",
+    }}>
+      <style>{`
+        html,body{touch-action:manipulation;-webkit-tap-highlight-color:transparent;overscroll-behavior:none;}
+        @keyframes popIn {
+          0%   { transform:scale(0.4); opacity:0; }
+          60%  { transform:scale(1.08); opacity:1; }
+          100% { transform:scale(1); opacity:1; }
+        }
+        @keyframes feltShake {
+          0%   { transform:translate(0,0); }
+          20%  { transform:translate(-3px,2px); }
+          40%  { transform:translate(3px,-2px); }
+          60%  { transform:translate(-2px,1px); }
+          80%  { transform:translate(2px,-1px); }
+          100% { transform:translate(0,0); }
+        }
+        @keyframes myTurn {
+          0%,100% { border-color:${COLORS.neonPurple}55; }
+          50%     { border-color:${COLORS.neonPurple}; }
+        }
+        @keyframes cardAnim-N-enter { from { transform:translate(0px,-44px) scale(0.65) rotate(-8deg); opacity:0; } to { transform:translate(0,0) scale(1) rotate(0deg); opacity:1; } }
+        @keyframes cardAnim-N-feste { from { transform:translate(0px,-44px) scale(0.55) rotate(-8deg); opacity:0; filter:brightness(1.6); } to { transform:translate(0,0) scale(1) rotate(0deg); opacity:1; filter:brightness(1); } }
+        @keyframes cardAnim-N-gedreht { from { transform:translate(0px,-44px) scale(0.6) rotate(-8deg); opacity:0; } to { transform:translate(0,0) scale(1) rotate(810deg); opacity:1; } }
+        @keyframes cardAnim-S-enter { from { transform:translate(0px,44px) scale(0.65) rotate(8deg); opacity:0; } to { transform:translate(0,0) scale(1) rotate(0deg); opacity:1; } }
+        @keyframes cardAnim-S-feste { from { transform:translate(0px,44px) scale(0.55) rotate(8deg); opacity:0; filter:brightness(1.6); } to { transform:translate(0,0) scale(1) rotate(0deg); opacity:1; filter:brightness(1); } }
+        @keyframes cardAnim-S-gedreht { from { transform:translate(0px,44px) scale(0.6) rotate(8deg); opacity:0; } to { transform:translate(0,0) scale(1) rotate(810deg); opacity:1; } }
+        @keyframes cardAnim-E-enter { from { transform:translate(44px,0px) scale(0.65) rotate(8deg); opacity:0; } to { transform:translate(0,0) scale(1) rotate(0deg); opacity:1; } }
+        @keyframes cardAnim-E-feste { from { transform:translate(44px,0px) scale(0.55) rotate(8deg); opacity:0; filter:brightness(1.6); } to { transform:translate(0,0) scale(1) rotate(0deg); opacity:1; filter:brightness(1); } }
+        @keyframes cardAnim-E-gedreht { from { transform:translate(44px,0px) scale(0.6) rotate(8deg); opacity:0; } to { transform:translate(0,0) scale(1) rotate(810deg); opacity:1; } }
+        @keyframes cardAnim-W-enter { from { transform:translate(-44px,0px) scale(0.65) rotate(-8deg); opacity:0; } to { transform:translate(0,0) scale(1) rotate(0deg); opacity:1; } }
+        @keyframes cardAnim-W-feste { from { transform:translate(-44px,0px) scale(0.55) rotate(-8deg); opacity:0; filter:brightness(1.6); } to { transform:translate(0,0) scale(1) rotate(0deg); opacity:1; filter:brightness(1); } }
+        @keyframes cardAnim-W-gedreht { from { transform:translate(-44px,0px) scale(0.6) rotate(-8deg); opacity:0; } to { transform:translate(0,0) scale(1) rotate(810deg); opacity:1; } }
+      `}</style>
+
+      {/* ── HEADER ── */}
+      <div style={{
+        display:"flex", alignItems:"center", justifyContent:"space-between",
+        padding:"calc(6px + env(safe-area-inset-top, 0px)) 12px 6px", minHeight:46, flexShrink:0,
+        background:COLORS.panel,
+        borderBottom:`3px solid ${COLORS.outline}`,
+      }}>
+        <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+          <span style={{fontSize:12,opacity:0.5,letterSpacing:0.5}}>{N.S}&{N.N}</span>
+          <span style={{fontSize:20,fontWeight:900,color:homeTricks>=TARGET_TRICKS?COLORS.neonGreen:COLORS.cream,lineHeight:1}}>{homeTricks}</span>
+          <span style={{fontSize:14,opacity:0.3}}>–</span>
+          <span style={{fontSize:20,fontWeight:900,color:awayTricks>=TARGET_TRICKS?COLORS.neonGreen:COLORS.cream,lineHeight:1}}>{awayTricks}</span>
+          <span style={{fontSize:12,opacity:0.5,letterSpacing:0.5}}>{N.E}&{N.W}</span>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          {roomCode && (
+            <div style={{fontSize:12,padding:"3px 8px",borderRadius:PXR,background:COLORS.panelDark,border:`2px solid #3a2f60`,letterSpacing:1,color:connState==="ok"?COLORS.neonGreen:COLORS.redAccent}}>
+              {roomCode}
+            </div>
+          )}
+          {state.trumpSuit && (
+            <div style={{fontSize:13,display:"flex",alignItems:"center",gap:3,padding:"3px 8px",borderRadius:PXR,background:COLORS.panelDark,border:`2px solid #3a2f60`}}>
+              <span style={{color:SUIT_INFO[state.trumpSuit].color,fontSize:17}}>{SUIT_INFO[state.trumpSuit].symbol}</span>
+              {state.phase==="playing"&&<span style={{opacity:0.4}}>{Math.min(state.trickNumber,13)}/13</span>}
+            </div>
+          )}
+          <SignalLegendDropdown/>
+          <button onClick={()=>setShowRules(true)} style={{width:40,height:40,borderRadius:PXR,background:COLORS.panelDark,border:`2px solid #3a2f60`,color:COLORS.cream,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Info size={16}/></button>
+          <button onClick={()=>setConfirmRestart(true)} style={{width:40,height:40,borderRadius:PXR,background:COLORS.panelDark,border:`2px solid #3a2f60`,color:COLORS.cream,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><RotateCcw size={16}/></button>
+        </div>
+      </div>
+
+      {/* ── STATUS ── */}
+      <div style={{
+        textAlign:"center", fontSize:14, fontWeight:900, padding:"5px 16px", flexShrink:0,
+        letterSpacing:0.5,
+        color: isMyTurn ? COLORS.goldLight : "rgba(245,240,255,0.45)",
+      }}>{statusText}</div>
+
+      {/* ── SPIELFELD ── */}
+      <div style={{flex:1, padding:"4px 8px", display:"flex", flexDirection:"column", minHeight:0}}>
+        <div style={{
+          flex:1, borderRadius:PXR*2, display:"flex", flexDirection:"column",
+          alignItems:"center", justifyContent:"space-between", padding:"8px 6px",
+          background:COLORS.felt,
+          border:`3px solid ${COLORS.neonPurple}55`,
+          boxShadow:`inset 0 0 0 3px ${COLORS.outline}`,
+          animation:tableShake?"feltShake 0.38s steps(4)":"none",
+          minHeight:0, position:"relative", zIndex:Z.TABLE,
+        }}>
+          <PlayerSlot name={N[top]} count={countFor(top)} active={state.currentTurn===top} signal={signals[top]} signalHidden={isSignalPlayed(top)} isMe={top===mySeat} isBot={botSeats.includes(top)}/>
+
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",width:"100%",gap:4}}>
+            <PlayerSlot name={N[left]} count={countFor(left)} active={state.currentTurn===left} signal={signals[left]} signalHidden={isSignalPlayed(left)} isMe={left===mySeat} isBot={botSeats.includes(left)}/>
+
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,58px)",gridTemplateRows:"repeat(3,80px)",gap:3,flexShrink:0}}>
+              <div/><TrickCell play={findPlay(top)} seat={top} signal={signals[top]}/><div/>
+              <TrickCell play={findPlay(left)} seat={left} signal={signals[left]}/>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"center"}}>
+                {state.trumpSuit
+                  ? <span style={{fontSize:24,color:SUIT_INFO[state.trumpSuit].color}}>{SUIT_INFO[state.trumpSuit].symbol}</span>
+                  : <span style={{fontSize:14,opacity:0.2}}>—</span>}
+              </div>
+              <TrickCell play={findPlay(right)} seat={right} signal={signals[right]}/>
+              <div/><TrickCell play={findPlay(bottom)} seat={bottom} signal={signals[bottom]}/><div/>
+            </div>
+
+            <PlayerSlot name={N[right]} count={countFor(right)} active={state.currentTurn===right} signal={signals[right]} signalHidden={isSignalPlayed(right)} isMe={right===mySeat} isBot={botSeats.includes(right)}/>
+          </div>
+
+          <PlayerSlot name={N[bottom]} count={myCards.length} active={state.currentTurn===bottom} signal={signals[bottom]} signalHidden={isSignalPlayed(bottom)} isMe={bottom===mySeat} isBot={botSeats.includes(bottom)}/>
+        </div>
+      </div>
+
+      {/* ── TRUMPF-WAHL ── */}
+      {state.phase==="trumpSelect" && state.declarer===mySeat && (
+        <TrumpPicker
+          onPick={suit=>onAction({type:"selectTrump",suit})}
+          onRandom={()=>onAction({type:"selectTrump",suit:SUIT_KEYS[Math.floor(Math.random()*4)]})}
+          previewCards={shownCards}
+        />
+      )}
+
+      {/* ── MEINE HAND ── */}
+      {!isPreDeclareForMe && (
+      <div style={{
+        flexShrink:0, padding:"4px 8px 2px",
+        borderTop:`3px solid ${COLORS.outline}`,
+        background:COLORS.panel,
+        position:"relative", zIndex:Z.HAND_REST,
+      }}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:3,padding:"3px 2px 0"}}>
+          <span style={{fontSize:11,opacity:0.45,letterSpacing:0.5}}>
+            DEINE HAND · {myCards.length} KARTEN
+          </span>
+          {state.trumpSuit && <span style={{fontSize:11,opacity:0.35}}>TRUMPF LINKS</span>}
+        </div>
+        <div ref={handScrollRef} style={{
+          display:"flex", gap:3, overflowX:"auto", paddingBottom:4,
+          WebkitOverflowScrolling:"touch", scrollbarWidth:"none",
+          border: isMyTurn ? `2px solid ${COLORS.neonPurple}` : "2px solid transparent",
+          borderRadius:PXR, padding:"4px 4px 8px",
+          animation: isMyTurn ? "myTurn 1.2s steps(2) infinite" : "none",
+          transition:"border-color 0.3s",
+        }}>
+          {shownCards.map(card=>{
+            const clickable = isMyTurn && isCardPlayable(card, myCards, state);
+            const dim = isMyTurn && !clickable;
+            return <DraggableHandCard key={card.id} card={card} clickable={clickable} dim={dim}
+              onPlay={()=>onAction({type:"playCard",card})}
+              highlight={!!state.trumpSuit && card.suit===state.trumpSuit}/>;
+          })}
+        </div>
+        <HandScrollbar scrollRef={handScrollRef} deps={shownCards.length}/>
+      </div>
+      )}
+
+      {/* ── SIGNAL-BUTTONS ── */}
+      {canSignal && (
+        <div style={{padding:"4px 8px 6px",display:"flex",gap:6,flexShrink:0,background:COLORS.panel,position:"relative",zIndex:Z.TABLE}}>
+          {Object.values(SIGNALS).map(type=>(
+            <SignalButton key={type} type={type} isActive={mySignal?.type===type}
+              onClick={()=>onAction({type:"signal",signalType:type})}/>
+          ))}
+        </div>
+      )}
+
+      {/* ── LOG ── */}
+      <div style={{
+        padding:"3px 16px calc(7px + env(safe-area-inset-bottom, 0px))", fontSize:12, opacity:0.4, fontFamily:PIXEL_FONT,
+        textAlign:"center", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", flexShrink:0,
+        background:COLORS.panel,
+      }}>
+        {state.log[state.log.length-1]}
+      </div>
+
+      {/* ── MODALS ── */}
+      {showRules && <RulesModal names={N} onClose={()=>setShowRules(false)}/>}
+      {confirmRestart && (
+        <div style={{position:"fixed",inset:0,zIndex:50,display:"flex",alignItems:"center",justifyContent:"center",padding:24,background:"rgba(8,5,18,0.7)"}}>
+          <div style={{width:"100%",maxWidth:300,borderRadius:PXR*2,padding:20,background:COLORS.panel,border:`3px solid ${COLORS.neonPurple}`,boxShadow:hardShadow(4,4,COLORS.outline)}}>
+            <p style={{fontSize:16,marginBottom:18,textAlign:"center",lineHeight:1.6,color:COLORS.cream}}>Neues Spiel?<br/><span style={{opacity:0.5,fontSize:14}}>Rundenstand geht verloren.</span></p>
+            <div style={{display:"flex",gap:10}}>
+              <button onClick={()=>setConfirmRestart(false)} style={{flex:1,padding:"13px 0",minHeight:44,borderRadius:PXR,background:COLORS.panelDark,color:COLORS.cream,border:`2px solid #3a2f60`,cursor:"pointer",fontWeight:900,fontFamily:PIXEL_FONT,fontSize:15}}>ABBRECHEN</button>
+              <button onClick={()=>{ setConfirmRestart(false); onNewGame(); }} style={{flex:1,padding:"13px 0",minHeight:44,borderRadius:PXR,fontWeight:900,background:COLORS.redAccent,color:COLORS.outline,border:`2px solid ${COLORS.outline}`,cursor:"pointer",fontFamily:PIXEL_FONT,fontSize:15,boxShadow:hardShadow(2,2,COLORS.outline)}}>NEU</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {state.phase==="handEnd" && <HandEndModal state={state} mySeat={mySeat} onNext={()=>onAction({type:"nextHand"})} canAdvance={canAdvanceHand} hostName={hostName}/>}
+      {activeEvent && <EventPopup event={activeEvent} onDismiss={()=>{ setActiveEvent(null); onAction({type:"acknowledgeEvent"}); }}/>}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// BOT-WISSENSSYSTEM
+// ─────────────────────────────────────────────────────────────────
+function buildBotKnowledge(state, seat) {
+  const { trumpSuit, trickHistory = [], currentTrick, hands } = state;
+  const playedCards = new Set();
+  (trickHistory || []).forEach(trick => trick.forEach(t => playedCards.add(t.card.id)));
+  (currentTrick || []).forEach(t => playedCards.add(t.card.id));
+  const myHand = hands[seat] || [];
+  myHand.forEach(c => playedCards.delete(c.id));
+  const fullDeck = [];
+  for (const s of SUIT_KEYS) for (let r = 2; r <= 14; r++) fullDeck.push({ suit: s, rank: r, id: `${s}${r}` });
+  const remainingCards = fullDeck.filter(c => !playedCards.has(c.id) && !myHand.some(m => m.id === c.id));
+  const noSuit = { S: new Set(), E: new Set(), N: new Set(), W: new Set() };
+  (trickHistory || []).forEach(trick => {
+    const lead = trick[0]?.card?.suit;
+    if (!lead) return;
+    trick.forEach(t => {
+      if (t.card.suit !== lead && t.card.suit !== trumpSuit) {
+        noSuit[t.player].add(lead);
+      }
+    });
+    const trickHadTrump = trick.some(t => t.card.suit === trumpSuit);
+    if (trickHadTrump) {
+      trick.forEach(t => {
+        if (t.card.suit !== trumpSuit && t.card.suit !== lead) {
+          noSuit[t.player].add(trumpSuit);
+        }
+      });
+    }
+  });
+  const signals = state.signals || {};
+  Object.entries(signals).forEach(([player, sig]) => {
+    if (sig?.type === SIGNALS.GEDREHT && sig.suit) {
+      noSuit[player]?.add(sig.suit);
+    }
+  });
+  const gedrehtSuits = new Set(
+    Object.values(signals).filter(sig => sig?.type === SIGNALS.GEDREHT).map(sig => sig.suit)
+  );
+  const festeInfo = {};
+  Object.entries(signals).forEach(([player, sig]) => {
+    if (sig?.type === SIGNALS.FESTE && sig.suit) {
+      festeInfo[sig.suit] = { player };
+    }
+  });
+  const myTrumps = myHand.filter(c => c.suit === trumpSuit);
+  const remainingTrumps = remainingCards.filter(c => c.suit === trumpSuit);
+  const playedTrumps = [...playedCards].filter(id => id.startsWith(trumpSuit)).length;
+  const totalTrumps = 13;
+  const trumpsOut = totalTrumps - myTrumps.length - playedTrumps;
+  const cardStillOut = (suit, rank) => remainingCards.some(c => c.suit === suit && c.rank === rank);
+  const myTeam = teamOf(seat);
+  const partner = { N:"S", S:"N", E:"W", W:"E" }[seat];
+  const homeTricks = state.tricksByPlayer.S + state.tricksByPlayer.N;
+  const awayTricks = state.tricksByPlayer.E + state.tricksByPlayer.W;
+  const myTeamTricks = myTeam === "home" ? homeTricks : awayTricks;
+  const oppTeamTricks = myTeam === "home" ? awayTricks : homeTricks;
+  const tricksLeft = 13 - state.trickNumber + 1;
+  return {
+    remainingCards, remainingTrumps, playedCards, noSuit, trumpsOut, cardStillOut,
+    myTeamTricks, oppTeamTricks, tricksLeft, partner, myTeam, gedrehtSuits, festeInfo,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// BOT-KI
+// ─────────────────────────────────────────────────────────────────
+function lowestOfTopSequence(safeCardsOfSuit) {
+  if (!safeCardsOfSuit.length) return null;
+  const sorted = safeCardsOfSuit.slice().sort((a, b) => b.rank - a.rank);
+  let run = [sorted[0]];
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i - 1].rank - sorted[i].rank === 1) run.push(sorted[i]);
+    else break;
+  }
+  return run[run.length - 1];
+}
+function isSafeWinner(card, trumpSuit, hand, knowledge) {
+  const { cardStillOut, remainingCards } = knowledge;
+  if (card.suit === trumpSuit) {
+    const higherTrumpsOut = remainingCards.some(c => c.suit === trumpSuit && c.rank > card.rank);
+    return !higherTrumpsOut;
+  }
+  const trumpsStillOut = card.suit !== trumpSuit && remainingCards.some(c => c.suit === trumpSuit);
+  if (trumpsStillOut) return false;
+  for (let r = 14; r > card.rank; r--) {
+    const inOwnHand = hand.some(c => c.suit === card.suit && c.rank === r);
+    if (inOwnHand) continue;
+    if (cardStillOut(card.suit, r)) return false;
+  }
+  return true;
+}
+function botChooseLead(hand, state, knowledge) {
+  const { partner, noSuit, remainingCards, oppTeamTricks } = knowledge;
+  const pSig = state.signals?.[partner];
+  const by = {}; SUIT_KEYS.forEach(s => by[s] = []);
+  hand.forEach(c => by[c.suit].push(c));
+  const sevenZeroAlive = oppTeamTricks === 0;
+  const safeBySuit = {};
+  for (const s of SUIT_KEYS) {
+    safeBySuit[s] = by[s].filter(c => isSafeWinner(c, state.trumpSuit, hand, knowledge));
+  }
+  const totalSafe = Object.values(safeBySuit).flat();
+  if (pSig?.type === SIGNALS.FESTE || pSig?.type === SIGNALS.GEDREHT) {
+    const sigSuit = pSig.suit;
+    const safeElsewhere = SUIT_KEYS.some(s => s !== sigSuit && safeBySuit[s]?.length > 0);
+    if (!safeElsewhere) {
+      if (sigSuit && by[sigSuit]?.length) {
+        return by[sigSuit].slice().sort((a, b) => a.rank - b.rank)[0];
+      }
+      const fallback = SUIT_KEYS.filter(s => s !== state.trumpSuit && by[s]?.length > 0);
+      if (fallback.length > 0) {
+        const best = fallback.sort((a, b) => by[b].length - by[a].length)[0];
+        return by[best].slice().sort((a, b) => a.rank - b.rank)[0];
+      }
+    }
+  }
+  if (sevenZeroAlive && totalSafe.length > 0) {
+    const safeTrumps = safeBySuit[state.trumpSuit] || [];
+    if (safeTrumps.length > 0) {
+      if (safeTrumps.length > 1) {
+        return lowestOfTopSequence(safeTrumps);
+      }
+      return safeTrumps.slice().sort((a, b) => b.rank - a.rank)[0];
+    }
+    for (const s of SUIT_KEYS) {
+      if (safeBySuit[s].length > 1) return lowestOfTopSequence(safeBySuit[s]);
+    }
+    return totalSafe.slice().sort((a, b) => b.rank - a.rank)[0];
+  }
+  const oppSeats = SEATS.filter(s => teamOf(s) !== knowledge.myTeam);
+  const oppHasNoTrump = oppSeats.every(s => noSuit[s]?.has(state.trumpSuit));
+  if (oppHasNoTrump && by[state.trumpSuit]?.length === 0) {
+    const allCards = hand.slice().sort((a, b) => b.rank - a.rank);
+    if (allCards.length) return allCards[0];
+  }
+  if (totalSafe.length > 0) {
+    for (const s of SUIT_KEYS) {
+      if (safeBySuit[s].length > 1) return lowestOfTopSequence(safeBySuit[s]);
+    }
+    return totalSafe.slice().sort((a, b) => b.rank - a.rank)[0];
+  }
+  const myTrumps = by[state.trumpSuit] || [];
+  const oppTrumpsOut = remainingCards.filter(c => c.suit === state.trumpSuit).length;
+  if (myTrumps.length >= 2 && oppTrumpsOut > 0) {
+    const highTrumps = myTrumps.filter(c => c.rank >= 12);
+    if (highTrumps.length > 0) {
+      return highTrumps.slice().sort((a, b) => b.rank - a.rank)[0];
+    }
+  }
+  const oppSeatsArr = SEATS.filter(s => teamOf(s) !== knowledge.myTeam);
+  for (const s of SUIT_KEYS) {
+    if (s === state.trumpSuit) continue;
+    const oppMissingThis = oppSeatsArr.some(op => noSuit[op]?.has(s));
+    const oppHasFeste = knowledge.festeInfo?.[s] && oppSeatsArr.includes(knowledge.festeInfo[s].player);
+    if (!oppMissingThis && !oppHasFeste && by[s]?.length > 0) {
+      return by[s].slice().sort((a, b) => a.rank - b.rank)[0];
+    }
+  }
+  const nonTrump = SUIT_KEYS.filter(s => s !== state.trumpSuit && by[s].length > 0);
+  if (nonTrump.length > 0) {
+    const best = nonTrump.slice().sort((a, b) => by[b].length - by[a].length)[0];
+    return by[best].slice().sort((a, b) => a.rank - b.rank)[0];
+  }
+  return hand.slice().sort((a, b) => a.rank - b.rank)[0];
+}
+function botChooseFollow(playable, state, knowledge) {
+  const { remainingCards, remainingTrumps, oppTeamTricks, tricksLeft, festeInfo } = knowledge;
+  const best = getCurrentBest(state.currentTrick, state.leadSuit, state.trumpSuit);
+  const partnerWinning = best && teamOf(best.player) === teamOf(state.currentTurn);
+  const isLastToPlay = state.currentTrick.length === 3;
+  const bestIsTrump = best && best.card.suit === state.trumpSuit;
+  const partnerTrumped = partnerWinning && bestIsTrump;
+  const sevenZeroAlive = oppTeamTricks === 0;
+  const partnerHasFesteForLead = state.leadSuit
+    && festeInfo?.[state.leadSuit]?.player === knowledge.partner;
+  function bestDiscard(cards) {
+    const nonTrump = cards.filter(c => c.suit !== state.trumpSuit);
+    const pool = nonTrump.length > 0 ? nonTrump : cards;
+    const bySuit = {};
+    pool.forEach(c => { (bySuit[c.suit] = bySuit[c.suit] || []).push(c); });
+    const suits = Object.keys(bySuit).sort((a, b) => bySuit[a].length - bySuit[b].length);
+    const targetSuit = suits[0];
+    return bySuit[targetSuit].slice().sort((a, b) => a.rank - b.rank)[0]
+      ?? pool.slice().sort((a, b) => a.rank - b.rank)[0];
+  }
+  const aceOfLead = state.leadSuit && playable.find(c => c.suit === state.leadSuit && c.rank === 14);
+  if (aceOfLead && !bestIsTrump && !partnerWinning) return aceOfLead;
+  if (partnerWinning) {
+    if (partnerTrumped) {
+      const nonTrumpPlayable = playable.filter(c => c.suit !== state.trumpSuit);
+      if (nonTrumpPlayable.length > 0) {
+        return bestDiscard(nonTrumpPlayable);
+      }
+      if (sevenZeroAlive) {
+        const oppStillToAct = SEATS.filter(s => teamOf(s) !== knowledge.myTeam)
+          .some(s => !state.currentTrick.some(t => t.player === s));
+        const higherTrumpThreatOut = remainingCards.some(c => c.suit === state.trumpSuit && c.rank > best.card.rank);
+        if (oppStillToAct && higherTrumpThreatOut) {
+          const overTrump = playable.filter(c => c.suit === state.trumpSuit && c.rank > best.card.rank);
+          if (overTrump.length > 0) return overTrump.slice().sort((a, b) => a.rank - b.rank)[0];
+        }
+      }
+      return playable.slice().sort((a, b) => a.rank - b.rank)[0];
+    }
+    if (sevenZeroAlive && isLastToPlay) {
+      return bestDiscard(playable);
+    }
+    return bestDiscard(playable);
+  }
+  const winners = playable.filter(c => {
+    if (!best) return true;
+    const cIsTrump = c.suit === state.trumpSuit;
+    if (bestIsTrump) return cIsTrump && c.rank > best.card.rank;
+    if (cIsTrump) return true;
+    if (c.suit !== state.leadSuit) return false;
+    return c.rank > best.card.rank;
+  });
+  if (partnerHasFesteForLead && !sevenZeroAlive && winners.length > 0) {
+    const partnerStillToPlay = !state.currentTrick.some(t => t.player === knowledge.partner);
+    if (partnerStillToPlay) {
+      return bestDiscard(playable);
+    }
+  }
+  if (winners.length > 0) {
+    if (sevenZeroAlive) {
+      return winners.slice().sort((a, b) => b.rank - a.rank)[0];
+    }
+    const minWinner = winners.slice().sort((a, b) => a.rank - b.rank)[0];
+    if (tricksLeft <= 3 && winners.some(c => c.rank === 14)) {
+      return winners.find(c => c.rank === 14);
+    }
+    if (!bestIsTrump && !isLastToPlay) {
+      const oppStillToPlay = SEATS.filter(s => teamOf(s) !== knowledge.myTeam)
+        .some(s => !state.currentTrick.some(t => t.player === s));
+      const cheapTrumpAvailable = playable.some(c => c.suit === state.trumpSuit);
+      if (oppStillToPlay && cheapTrumpAvailable && minWinner.suit !== state.trumpSuit) {
+        const trumpsStillOut = remainingTrumps.length > 0;
+        if (trumpsStillOut) return bestDiscard(playable);
+      }
+    }
+    return minWinner;
+  }
+  return bestDiscard(playable);
+}
+function botChooseCard(hand, state) {
+  const playable = hand.filter(c => isCardPlayable(c, hand, state));
+  if (!playable.length) return hand[0];
+  const knowledge = buildBotKnowledge(state, state.currentTurn);
+  if (state.currentTrick.length === 0) {
+    return botChooseLead(playable, state, knowledge);
+  }
+  return botChooseFollow(playable, state, knowledge);
+}
+function botChooseTrump(hand) {
+  const score = {};
+  SUIT_KEYS.forEach(s => {
+    const cards = hand.filter(c => c.suit === s);
+    score[s] = cards.length * 2
+      + cards.filter(c => c.rank === 14).length * 4
+      + cards.filter(c => c.rank === 13).length * 3
+      + cards.filter(c => c.rank === 12).length * 2
+      + cards.filter(c => c.rank === 11).length * 1;
+  });
+  return SUIT_KEYS.reduce((a, b) => score[b] > score[a] ? b : a);
+}
+function botDecideSignal(seat, card, state) {
+  if (state.currentTrick.length !== 0) return null;
+  const suitCards = state.hands[seat].filter(c => c.suit === card.suit && c.id !== card.id);
+  if (suitCards.length === 0) return SIGNALS.GEDREHT;
+  const maxRemaining = Math.max(...suitCards.map(c => c.rank));
+  if (card.rank > maxRemaining && card.rank >= 10) return SIGNALS.FESTE;
+  if (card.suit === state.trumpSuit && card.rank >= 12) return SIGNALS.FESTE;
+  if (card.rank === 14) return SIGNALS.FESTE;
+  return null;
+}
+function botTakeTurn(gs) {
+  const seat = gs.currentTurn;
+  const card = botChooseCard(gs.hands[seat]||[], gs);
+  if (!card) return gs;
+  const sig = botDecideSignal(seat, card, gs);
+  let s = gs;
+  if (sig) s = {...gs, signals:{...gs.signals,[seat]:{type:sig,suit:card.suit,cardId:card.id,trickNumber:gs.trickNumber}},
+    log:[...gs.log,`${gs.names[seat]}: ${SIGNAL_INFO[sig].emoji} ${SIGNAL_INFO[sig].label}`]};
+  return applyPlayCard(s, seat, card);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// LOSVERFAHREN-SCREEN (CPU-Modus)
+// ─────────────────────────────────────────────────────────────────
+function SpreadCard({ index, faceDown, card, picked, dimmed, clickable, onClick, highlight, takenByOpponent }) {
+  const perRow = 5;
+  const col = index % perRow;
+  const midCol = (perRow - 1) / 2;
+  const offset = col - midCol;
+  const seed = (index * 53) % 17;
+  const rotate = offset * 3.5 + (seed - 8) * 0.5;
+  const translateY = (seed % 5) - 2;
+  return (
+    <button
+      onClick={clickable ? onClick : undefined}
+      disabled={!clickable}
+      style={{
+        position:"relative",
+        transform:`translateY(${translateY}px) rotate(${rotate}deg)`,
+        cursor: clickable ? "pointer" : "default",
+        transition:"transform 0.18s steps(3), filter 0.15s, opacity 0.15s",
+        filter: dimmed ? "brightness(0.45)" : "none",
+        opacity: takenByOpponent ? 0.25 : 1,
+        background:"none", border:"none", padding:6, margin:-6,
+        justifySelf:"center",
+        zIndex: picked ? 20 : 1,
+        minWidth:44, minHeight:44, display:"flex", alignItems:"center", justifyContent:"center",
+      }}
+      onMouseEnter={e=>{ if(clickable) e.currentTarget.style.transform=`translateY(${translateY-8}px) rotate(${rotate}deg)`; }}
+      onMouseLeave={e=>{ e.currentTarget.style.transform=`translateY(${translateY}px) rotate(${rotate}deg)`; }}
+    >
+      {faceDown ? <CardBack/> : <CardFace card={card} clickable={false} highlight={highlight}/>}
+    </button>
+  );
+}
+function DrawScreen({ names, onDone }) {
+  const SPREAD_SIZE = 10;
+  const [deck] = useState(() => shuffle(buildDeck()));
+  const [spread, setSpread] = useState(() => deck.slice(0, SPREAD_SIZE));
+  const [usedCount, setUsedCount] = useState(SPREAD_SIZE);
+  const [homeIdx, setHomeIdx] = useState(null);
+  const [awayIdx, setAwayIdx] = useState(null);
+  const [phase, setPhase] = useState("home");
+  const [tieRound, setTieRound] = useState(0);
+  const homeRep = "S";
+  const awayRep = "E";
+  const homeCard = homeIdx != null ? spread[homeIdx] : null;
+  const awayCard = awayIdx != null ? spread[awayIdx] : null;
+  function pickMyCard(i) {
+    if (homeIdx != null) return;
+    setHomeIdx(i);
+    setPhase("cpuDrawing");
+    setTimeout(() => {
+      const remaining = spread.map((_, idx) => idx).filter(idx => idx !== i);
+      const cpuIdx = remaining[Math.floor(Math.random() * remaining.length)];
+      setAwayIdx(cpuIdx);
+      const hv = drawRankValue(spread[i].rank);
+      const av = drawRankValue(spread[cpuIdx].rank);
+      if (hv === av) setPhase("tieAnnounce");
+      else setPhase("result");
+    }, 900);
+  }
+  function redraw() {
+    const remainingInDeck = deck.slice(usedCount);
+    const poolSize = Math.min(remainingInDeck.length, Math.max(2, SPREAD_SIZE - tieRound * 2 - 2));
+    const nextSpread = remainingInDeck.slice(0, poolSize);
+    setSpread(nextSpread);
+    setUsedCount(usedCount + poolSize);
+    setTieRound(tieRound + 1);
+    setHomeIdx(null);
+    setAwayIdx(null);
+    setPhase("home");
+  }
+  function getWinner() {
+    if (!homeCard || !awayCard) return null;
+    const hv = drawRankValue(homeCard.rank);
+    const av = drawRankValue(awayCard.rank);
+    if (hv > av) return "home";
+    if (av > hv) return "away";
+    return "tie";
+  }
+  const winner = getWinner();
+  const firstDeclarer = winner === "away" ? awayRep : homeRep;
+  return (
+    <div style={{minHeight:"100vh",minHeight:"100dvh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
+      background:COLORS.bg2,color:COLORS.cream,fontFamily:PIXEL_FONT,padding:24,boxSizing:"border-box",
+      backgroundImage:`repeating-linear-gradient(0deg, ${COLORS.bg} 0px, ${COLORS.bg} 22px, ${COLORS.bg2} 22px, ${COLORS.bg2} 44px)`,
+    }}>
+      <TitleBadge subtitle="LOSVERFAHREN"/>
+      <p style={{fontSize:15,opacity:0.6,marginBottom:16,textAlign:"center",lineHeight:1.8,maxWidth:320}}>
+        {phase === "home"
+          ? <React.Fragment>{tieRound > 0 ? "Gleichstand! Wähle erneut aus den restlichen Karten." : "Wähle eine verdeckte Karte vom Tisch."}<br/><span style={{opacity:0.5}}>Ass gilt als 1 (niedrigste Karte)</span></React.Fragment>
+          : phase === "cpuDrawing"
+            ? <React.Fragment>{names[awayRep]} wählt jetzt eine Karte …</React.Fragment>
+            : phase === "tieAnnounce"
+              ? <React.Fragment>Gleichstand! Es wird mit den übrigen Karten neu gezogen.</React.Fragment>
+              : <React.Fragment>Wer höher zieht, bestimmt den Trumpf.</React.Fragment>}
+      </p>
+      <div style={{
+        display:"grid", gridTemplateColumns:`repeat(${Math.min(5, spread.length)}, 1fr)`, gridTemplateRows:"repeat(2, auto)",
+        columnGap:10, rowGap:14,
+        marginBottom:18, padding:"14px 14px", maxWidth:"100%",
+      }}>
+        {spread.map((card, i) => (
+          <SpreadCard key={card.id} index={i}
+            faceDown={i !== homeIdx && i !== awayIdx}
+            card={card}
+            picked={i === homeIdx || i === awayIdx}
+            dimmed={homeIdx != null && i !== homeIdx && i !== awayIdx}
+            clickable={phase === "home"}
+            onClick={() => pickMyCard(i)}
+            highlight={(i === homeIdx && winner==="home") || (i === awayIdx && winner==="away")}
+          />
+        ))}
+      </div>
+      <div style={{display:"flex",gap:14,justifyContent:"center",alignItems:"flex-start",width:"100%",maxWidth:340,marginBottom:8}}>
+        <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
+          <div style={{fontSize:13,opacity:0.45,letterSpacing:1}}>DU</div>
+          <div style={{fontSize:15,fontWeight:900,color:COLORS.goldLight}}>{names[homeRep]}</div>
+          {homeCard ? (
+            <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+              <div style={{fontSize:15,opacity:0.85,fontWeight:700,color:winner==="home"?COLORS.neonGreen:COLORS.cream}}>
+                {homeCard.rank === 14 ? "Ass = 1" : `${RANK_LABEL[homeCard.rank]} = ${drawRankValue(homeCard.rank)}`}
+                {" "}<span style={{color:SUIT_INFO[homeCard.suit].color}}>{SUIT_INFO[homeCard.suit].symbol}</span>
+              </div>
+              {winner==="home" && <div style={{fontSize:14,color:COLORS.neonGreen,fontWeight:900,letterSpacing:0.5}}>✦ DU GEWINNST!</div>}
+            </div>
+          ) : <div style={{fontSize:14,opacity:0.35}}>—</div>}
+        </div>
+        <div style={{paddingTop:14,fontSize:17,opacity:0.3,fontWeight:900,letterSpacing:1}}>VS</div>
+        <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
+          <div style={{fontSize:13,opacity:0.45,letterSpacing:1}}>CPU</div>
+          <div style={{fontSize:15,fontWeight:900,color:COLORS.goldLight}}>{names[awayRep]}</div>
+          {awayCard ? (
+            <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+              <div style={{fontSize:15,opacity:0.85,fontWeight:700,color:winner==="away"?COLORS.neonGreen:COLORS.cream}}>
+                {awayCard.rank === 14 ? "Ass = 1" : `${RANK_LABEL[awayCard.rank]} = ${drawRankValue(awayCard.rank)}`}
+                {" "}<span style={{color:SUIT_INFO[awayCard.suit].color}}>{SUIT_INFO[awayCard.suit].symbol}</span>
+              </div>
+              {winner==="away" && <div style={{fontSize:14,color:COLORS.neonGreen,fontWeight:900,letterSpacing:0.5}}>✦ CPU GEWINNT!</div>}
+            </div>
+          ) : phase === "cpuDrawing" ? (
+            <div style={{fontSize:14,opacity:0.6,letterSpacing:0.5}}>wählt …</div>
+          ) : <div style={{fontSize:14,opacity:0.35}}>—</div>}
+        </div>
+      </div>
+      <div style={{width:"100%", maxWidth:320}}>
+        {phase === "tieAnnounce" && (
+          <div style={{textAlign:"center",width:"100%"}}>
+            <div style={{marginBottom:16,padding:"10px 16px",borderRadius:PXR,background:COLORS.panel,border:`2px solid ${COLORS.gold}`}}>
+              <p style={{fontSize:16,margin:0,color:COLORS.goldLight,fontWeight:900}}>
+                Gleichstand ({RANK_LABEL[homeCard.rank]} = {RANK_LABEL[awayCard.rank]})! Neu ziehen aus den restlichen Karten.
+              </p>
+            </div>
+            <BigButton onClick={redraw}>NOCHMAL ZIEHEN 🔄</BigButton>
+          </div>
+        )}
+        {phase === "result" && (
+          <div style={{textAlign:"center",width:"100%"}}>
+            <div style={{marginBottom:16,padding:"10px 16px",borderRadius:PXR,background:COLORS.panel,border:`2px solid #3a2f60`}}>
+              <p style={{fontSize:16,margin:0}}>
+                <strong style={{color:COLORS.goldLight}}>{names[firstDeclarer]}</strong> bestimmt den Trumpf!
+              </p>
+            </div>
+            <BigButton onClick={()=>onDone(firstDeclarer)}>SPIEL STARTEN 🎴</BigButton>
+          </div>
+        )}
+      </div>
+      <style>{`html,body{touch-action:manipulation;-webkit-tap-highlight-color:transparent;overscroll-behavior:none;}`}</style>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// CPU-MODUS
+// ─────────────────────────────────────────────────────────────────
+function CPUMode({ playerName }) {
+  const OTHER_NAMES = PERSONAS.filter(n => n !== playerName);
+  const CPU_NAMES = {
+    S: playerName,
+    E: OTHER_NAMES[0] || "Aaron",
+    N: OTHER_NAMES[1] || "Grace",
+    W: OTHER_NAMES[2] || "Denny",
+  };
+  const [appPhase, setAppPhase] = useState("draw");
+  const [gs, setGs] = useState(null);
+
+  function handleDrawDone(declarer) {
+    setGs(dealNewGame(CPU_NAMES, 1, 0, 0, declarer, ["Spiel gestartet!"], declarer));
+    setAppPhase("playing");
+  }
+  function dispatch(action) {
+    setGs(prev => applyGameAction(prev, "S", action));
+  }
+  useEffect(()=>{
+    if(!gs||gs.phase!=="trumpSelect"||gs.declarer==="S") return;
+    const t=setTimeout(()=>setGs(p=>p&&p.phase==="trumpSelect"&&p.declarer!=="S"
+      ?applySelectTrump(p,botChooseTrump(p.hands[p.declarer]||[])):p),900);
+    return()=>clearTimeout(t);
+  },[gs?.phase,gs?.declarer]);
+  useEffect(()=>{
+    if(!gs||gs.phase!=="playing"||gs.trickComplete||!gs.currentTurn||gs.currentTurn==="S") return;
+    const seat=gs.currentTurn;
+    const t=setTimeout(()=>{
+      setGs(p=>{
+        if(!p||p.currentTurn!==seat||p.trickComplete) return p;
+        return botTakeTurn(p);
+      });
+    },650+Math.random()*400);
+    return()=>clearTimeout(t);
+  },[gs?.currentTurn,gs?.phase,gs?.trickComplete,gs?.trickNumber]);
+  useEffect(()=>{
+    if(!gs?.trickComplete) return;
+    if(gs.pendingEvent && !gs.eventAcknowledged) return;
+    const t=setTimeout(()=>setGs(p=>p?.trickComplete?applyClearTrick(p):p),1100);
+    return()=>clearTimeout(t);
+  },[gs?.trickComplete,gs?.trickNumber,gs?.pendingEvent,gs?.eventAcknowledged]);
+
+  if (appPhase === "draw") {
+    return <DrawScreen names={CPU_NAMES} onDone={handleDrawDone}/>;
+  }
+  if(!gs) return null;
+  return <GameView gameState={gs} mySeat="S" myHand={gs.hands["S"]} onAction={dispatch}
+    botSeats={["E","N","W"]}
+    onNewGame={()=>setGs(dealNewGame(CPU_NAMES,1,0,0,"S",["Neues Spiel."],"S"))}/>;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ONLINE-MULTIPLAYER (Sync über den eigenen Node-Server)
+// ─────────────────────────────────────────────────────────────────
+function OnlineEntryScreen({ onRoomReady, onBack }) {
+  const [mode, setMode] = useState(null);
+  const [codeInput, setCodeInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  async function createRoom() {
+    setBusy(true); setError(null);
+    // Bis zu 5 Versuche, einen noch nicht vergebenen Code zu finden
+    for (let i = 0; i < 5; i++) {
+      const code = genRoomCode();
+      const existing = await readRoom(code);
+      if (existing) continue;
+      const room = emptyRoom(code);
+      const server = await writeRoom(room);
+      setBusy(false);
+      if (!server) { setError("Server nicht erreichbar. Läuft server.js?"); return; }
+      onRoomReady(server, true);
+      return;
+    }
+    setBusy(false);
+    setError("Kein freier Raumcode gefunden. Nochmal versuchen.");
+  }
+  async function joinRoom() {
+    const code = codeInput.trim().toUpperCase();
+    if (code.length !== 4) { setError("Code hat 4 Buchstaben."); return; }
+    setBusy(true); setError(null);
+    const room = await readRoom(code);
+    setBusy(false);
+    if (!room) { setError(`Raum "${code}" nicht gefunden.`); return; }
+    onRoomReady(room, false);
+  }
+
+  return (
+    <ScreenShell>
+      <TitleBadge subtitle="ONLINE MULTIPLAYER"/>
+      <div style={{width:"100%",maxWidth:320,display:"flex",flexDirection:"column",gap:12}}>
+        {mode === null && (
+          <React.Fragment>
+            <BigButton onClick={createRoom} disabled={busy}>
+              <Users size={18}/> RAUM ERSTELLEN
+            </BigButton>
+            <BigButton onClick={()=>setMode("join")} color={COLORS.neonBlue}>
+              <LogIn size={18}/> RAUM BEITRETEN
+            </BigButton>
+          </React.Fragment>
+        )}
+        {mode === "join" && (
+          <React.Fragment>
+            <input
+              value={codeInput}
+              onChange={e=>setCodeInput(e.target.value.toUpperCase().slice(0,4))}
+              placeholder="CODE"
+              maxLength={4}
+              autoFocus
+              style={{
+                width:"100%", boxSizing:"border-box", padding:"14px", fontSize:26, fontWeight:900,
+                textAlign:"center", letterSpacing:10, borderRadius:PXR,
+                background:COLORS.panelDark, color:COLORS.goldLight,
+                border:`3px solid ${COLORS.neonPurple}`, outline:"none",
+                fontFamily:PIXEL_FONT, textTransform:"uppercase",
+              }}
+            />
+            <BigButton onClick={joinRoom} disabled={busy || codeInput.length!==4}>
+              BEITRETEN <ChevronRight size={16}/>
+            </BigButton>
+            <button onClick={()=>{setMode(null);setError(null);}} style={{fontSize:13,padding:"10px",borderRadius:PXR,background:"transparent",color:COLORS.cream,border:"none",cursor:"pointer",fontFamily:PIXEL_FONT,opacity:0.6}}>← zurück</button>
+          </React.Fragment>
+        )}
+        {error && (
+          <div style={{padding:"10px 12px",borderRadius:PXR,background:`${COLORS.redAccent}22`,border:`2px solid ${COLORS.redAccent}`,fontSize:14,textAlign:"center",color:COLORS.cream}}>
+            {error}
+          </div>
+        )}
+        {busy && <div style={{textAlign:"center",fontSize:13,opacity:0.5}}>lädt …</div>}
+      </div>
+      {mode===null && (
+        <button onClick={onBack} style={{marginTop:22,fontSize:13,padding:"10px 16px",borderRadius:PXR,background:COLORS.panelDark,color:COLORS.cream,border:`2px solid #3a2f60`,cursor:"pointer",fontFamily:PIXEL_FONT,fontWeight:700}}>
+          ← HAUPTMENÜ
+        </button>
+      )}
+    </ScreenShell>
+  );
+}
+
+function OnlineLobby({ initialRoom, isCreator, onEnterGame, onBack }) {
+  const [room, setRoom] = useState(initialRoom);
+  const roomRef = useRef(initialRoom);
+  const [mySeat, setMySeat] = useState(null);
+  const [myName, setMyName] = useState(null);
+  const [pickingPersonaFor, setPickingPersonaFor] = useState(null);
+  const [reclaimSeat, setReclaimSeat] = useState(null);
+  const [copied, setCopied] = useState(false);
+  const mySeatRef = useRef(null);
+  useEffect(()=>{ mySeatRef.current = mySeat; },[mySeat]);
+
+  async function commit(next) {
+    const withVer = {...next, version:(roomRef.current?.version??0)+1, updatedAt:Date.now()};
+    roomRef.current = withVer; setRoom(withVer);
+    const server = await writeRoom(withVer);
+    if (server && server.version > withVer.version) { roomRef.current = server; setRoom(server); }
+  }
+
+  useEffect(() => {
+    const id = setInterval(async () => {
+      const remote = await readRoom(initialRoom.code);
+      if (remote && remote.version > (roomRef.current?.version ?? -1)) {
+        roomRef.current = remote;
+        setRoom(remote);
+      }
+      const r = roomRef.current;
+      if (r && mySeatRef.current && r.host !== mySeatRef.current) {
+        const stale = Date.now() - r.updatedAt > HOST_TIMEOUT_MS;
+        const humanSeats = SEATS.filter(s => r.players[s] && !r.players[s].bot);
+        const seniorSeat = humanSeats[0];
+        if (stale && seniorSeat === mySeatRef.current) {
+          commit({...r, host: mySeatRef.current});
+        }
+      }
+    }, POLL_MS);
+    return () => clearInterval(id);
+  }, [initialRoom.code]);
+
+  useEffect(() => {
+    if (room.phase === "playing" && mySeat && myName) {
+      onEnterGame(room, mySeat, myName);
+    }
+  }, [room.phase, mySeat, myName]);
+
+  const takenPersonas = SEATS.map(s => room.players[s]?.name).filter(Boolean);
+  const isHost = mySeat != null && room.host === mySeat;
+  const humanCount = SEATS.filter(s => room.players[s] && !room.players[s].bot).length;
+
+  async function claimSeat(seat, name) {
+    const r = roomRef.current;
+    const next = {
+      ...r,
+      players: {...r.players, [seat]: {name, bot:false}},
+      host: r.host ?? seat,
+    };
+    setMySeat(seat); setMyName(name);
+    await commit(next);
+  }
+  async function leaveSeat() {
+    const r = roomRef.current;
+    if (!mySeat) { onBack(); return; }
+    const next = {
+      ...r,
+      players: {...r.players, [mySeat]: null},
+      host: r.host === mySeat ? (SEATS.find(s => s!==mySeat && r.players[s] && !r.players[s].bot) ?? null) : r.host,
+    };
+    setMySeat(null); setMyName(null);
+    await commit(next);
+    onBack();
+  }
+  function doReclaim(seat) {
+    const p = roomRef.current.players[seat];
+    if (!p) return;
+    setMySeat(seat); setMyName(p.name);
+    setReclaimSeat(null);
+  }
+  async function startGame() {
+    const r = roomRef.current;
+    const players = {...r.players};
+    const used = SEATS.map(s => players[s]?.name).filter(Boolean);
+    const freePersonas = PERSONAS.filter(n => !used.includes(n));
+    let fi = 0;
+    SEATS.forEach(s => {
+      if (!players[s]) { players[s] = { name: freePersonas[fi++] || `Bot-${s}`, bot:true }; }
+    });
+    const names = { S:players.S.name, E:players.E.name, N:players.N.name, W:players.W.name };
+    const drawDeck = shuffle(buildDeck());
+    let bestSeat = SEATS[0], bestVal = -1;
+    const drawLog = [];
+    SEATS.forEach((s,i) => {
+      const c = drawDeck[i];
+      const v = drawRankValue(c.rank);
+      drawLog.push(`${names[s]} zieht ${cardLabel(c)} (=${v})`);
+      if (v > bestVal) { bestVal = v; bestSeat = s; }
+    });
+    const gs = dealNewGame(names, 1, 0, 0, bestSeat,
+      ["Losverfahren: " + drawLog.join(", ") + `. ${names[bestSeat]} bestimmt den Trumpf!`],
+      bestSeat, null);
+    await commit({...r, players, phase:"playing", gs});
+  }
+
+  if (pickingPersonaFor) {
+    return <PersonaSelectScreen
+      takenPersonas={takenPersonas}
+      subtitle={`PERSONA FÜR SITZ ${SEAT_LABEL[pickingPersonaFor].toUpperCase()}`}
+      onSelect={(name)=>{ claimSeat(pickingPersonaFor, name); setPickingPersonaFor(null); }}
+      onBack={()=>setPickingPersonaFor(null)}
+    />;
+  }
+
+  const teamColor = (seat) => teamOf(seat)==="home" ? COLORS.neonGreen : COLORS.neonBlue;
+
+  return (
+    <ScreenShell>
+      <TitleBadge subtitle="LOBBY"/>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16}}>
+        <div style={{
+          padding:"8px 18px",borderRadius:PXR,background:COLORS.panel,
+          border:`3px solid ${COLORS.gold}`,boxShadow:hardShadow(3,3,COLORS.outline),
+          fontSize:26,fontWeight:900,letterSpacing:8,color:COLORS.goldLight,
+        }}>{room.code}</div>
+        <button onClick={async()=>{
+          try { await navigator.clipboard.writeText(window.location.origin + "  →  Code: " + room.code); setCopied(true); setTimeout(()=>setCopied(false),1500); } catch {}
+        }} style={{width:44,height:44,borderRadius:PXR,background:COLORS.panelDark,border:`2px solid #3a2f60`,color:copied?COLORS.neonGreen:COLORS.cream,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>
+          <Copy size={16}/>
+        </button>
+      </div>
+      <p style={{fontSize:13,opacity:0.5,marginBottom:16,textAlign:"center",lineHeight:1.6}}>
+        Teile die Seiten-Adresse + den Code mit deinen Freunden.<br/>
+        Team <span style={{color:COLORS.neonGreen}}>Süd+Nord</span> vs Team <span style={{color:COLORS.neonBlue}}>Ost+West</span>
+      </p>
+
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,width:"100%",maxWidth:340,marginBottom:18}}>
+        {SEATS.map(seat => {
+          const p = room.players[seat];
+          const isMine = seat === mySeat;
+          return (
+            <button key={seat}
+              onClick={()=>{
+                if (isMine) return;
+                if (!p) {
+                  if (mySeat) return;
+                  setPickingPersonaFor(seat);
+                } else if (!p.bot && !mySeat) {
+                  setReclaimSeat(seat);
+                }
+              }}
+              style={{
+                padding:"14px 8px", minHeight:76, borderRadius:PXR,
+                background: isMine ? COLORS.gold : p ? COLORS.panel : COLORS.panelDark,
+                border:`3px solid ${isMine ? COLORS.outline : p ? teamColor(seat) : "#3a2f60"}`,
+                color: isMine ? COLORS.outline : COLORS.cream,
+                cursor: (!p && !mySeat) || (p && !p.bot && !mySeat) ? "pointer" : "default",
+                boxShadow: hardShadow(2,2,COLORS.outline),
+                display:"flex",flexDirection:"column",alignItems:"center",gap:4,
+                fontFamily:PIXEL_FONT,
+              }}>
+              <span style={{fontSize:11,letterSpacing:1,opacity:0.6,fontWeight:700}}>
+                {SEAT_LABEL[seat].toUpperCase()} · {teamOf(seat)==="home"?"TEAM 1":"TEAM 2"}
+              </span>
+              <span style={{fontSize:16,fontWeight:900}}>
+                {p ? `${p.bot?"🤖 ":""}${p.name}${isMine?" ✦":""}` : "FREI"}
+              </span>
+              {!p && !mySeat && <span style={{fontSize:11,opacity:0.5}}>antippen</span>}
+              {room.host===seat && p && <span style={{fontSize:10,color:isMine?COLORS.outline:COLORS.goldLight,letterSpacing:1}}>★ HOST</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      {reclaimSeat && (
+        <div style={{position:"fixed",inset:0,zIndex:50,display:"flex",alignItems:"center",justifyContent:"center",padding:24,background:"rgba(8,5,18,0.7)"}}>
+          <div style={{width:"100%",maxWidth:300,borderRadius:PXR*2,padding:20,background:COLORS.panel,border:`3px solid ${COLORS.neonPurple}`,boxShadow:hardShadow(4,4,COLORS.outline)}}>
+            <p style={{fontSize:15,marginBottom:16,textAlign:"center",lineHeight:1.6,color:COLORS.cream}}>
+              Als <strong style={{color:COLORS.goldLight}}>{room.players[reclaimSeat]?.name}</strong> wieder einsteigen?<br/>
+              <span style={{opacity:0.5,fontSize:13}}>(z.B. nach einem Seiten-Reload)</span>
+            </p>
+            <div style={{display:"flex",gap:10}}>
+              <button onClick={()=>setReclaimSeat(null)} style={{flex:1,padding:"12px 0",borderRadius:PXR,background:COLORS.panelDark,color:COLORS.cream,border:`2px solid #3a2f60`,cursor:"pointer",fontWeight:900,fontFamily:PIXEL_FONT,fontSize:14}}>NEIN</button>
+              <button onClick={()=>doReclaim(reclaimSeat)} style={{flex:1,padding:"12px 0",borderRadius:PXR,fontWeight:900,background:COLORS.gold,color:COLORS.outline,border:`2px solid ${COLORS.outline}`,cursor:"pointer",fontFamily:PIXEL_FONT,fontSize:14}}>JA ✦</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={{width:"100%",maxWidth:340,display:"flex",flexDirection:"column",gap:10}}>
+        {isHost ? (
+          <React.Fragment>
+            <BigButton onClick={startGame} disabled={!mySeat}>
+              SPIEL STARTEN 🎴
+            </BigButton>
+            <p style={{fontSize:12,opacity:0.45,textAlign:"center",lineHeight:1.5,margin:0}}>
+              Freie Plätze werden automatisch mit 🤖 Bots besetzt.<br/>
+              {humanCount} Spieler verbunden.
+            </p>
+          </React.Fragment>
+        ) : mySeat ? (
+          <div style={{padding:"12px",borderRadius:PXR,background:COLORS.panelDark,border:`2px dashed #3a2f60`,fontSize:14,textAlign:"center",opacity:0.7}}>
+            Warte auf den Host … ({humanCount} Spieler verbunden)
+          </div>
+        ) : (
+          <div style={{padding:"12px",borderRadius:PXR,background:COLORS.panelDark,border:`2px dashed #3a2f60`,fontSize:14,textAlign:"center",opacity:0.7}}>
+            Wähle zuerst einen freien Sitzplatz.
+          </div>
+        )}
+        <button onClick={leaveSeat} style={{fontSize:13,padding:"10px",borderRadius:PXR,background:"transparent",color:COLORS.cream,border:`2px solid #3a2f60`,cursor:"pointer",fontFamily:PIXEL_FONT,fontWeight:700,opacity:0.7}}>
+          ← RAUM VERLASSEN
+        </button>
+      </div>
+    </ScreenShell>
+  );
+}
+
+function OnlineGame({ initialRoom, mySeat, myName, onLeave }) {
+  const [room, setRoom] = useState(initialRoom);
+  const roomRef = useRef(initialRoom);
+  const [connState, setConnState] = useState("ok");
+  const isHost = room.host === mySeat;
+  const gs = room.gs;
+  const botSeats = SEATS.filter(s => room.players[s]?.bot);
+
+  async function commit(nextRoom) {
+    const withVer = {...nextRoom, version:(roomRef.current?.version??0)+1, updatedAt:Date.now()};
+    roomRef.current = withVer; setRoom(withVer);
+    const server = await writeRoom(withVer);
+    setConnState(server ? "ok" : "err");
+    // Server ist autoritativ: hat dort inzwischen jemand anderes eine höhere
+    // Version geschrieben, übernehmen wir dessen Stand statt unseres eigenen.
+    if (server && server.version > withVer.version) {
+      roomRef.current = server; setRoom(server);
+    }
+  }
+
+  useEffect(() => {
+    const id = setInterval(async () => {
+      const remote = await readRoom(initialRoom.code);
+      if (!remote) { setConnState("err"); return; }
+      setConnState("ok");
+      if (remote.version > (roomRef.current?.version ?? -1)) {
+        roomRef.current = remote;
+        setRoom(remote);
+      }
+      const r = roomRef.current;
+      if (r && r.host !== mySeat) {
+        const stale = Date.now() - r.updatedAt > HOST_TIMEOUT_MS;
+        const humanSeats = SEATS.filter(s => r.players[s] && !r.players[s].bot);
+        const seniorSeat = humanSeats[0];
+        if (stale && seniorSeat === mySeat && r.gs) {
+          const gsWithLog = {...r.gs, log:[...r.gs.log, `${myName} übernimmt Host-Aufgaben (Verbindung zu ${r.players[r.host]?.name || "Host"} verloren).`]};
+          commit({...r, host: mySeat, gs: gsWithLog});
+        }
+      }
+    }, POLL_MS);
+    return () => clearInterval(id);
+  }, [initialRoom.code, mySeat]);
+
+  useEffect(() => {
+    if (!isHost) return;
+    const id = setInterval(() => {
+      const r = roomRef.current;
+      if (!r) return;
+      if (Date.now() - r.updatedAt < HOST_HEARTBEAT_MS) return;
+      commit({...r});
+    }, HOST_HEARTBEAT_MS);
+    return () => clearInterval(id);
+  }, [isHost]);
+
+  function dispatch(action) {
+    const r = roomRef.current;
+    if (!r?.gs) return;
+    if (action.type === "nextHand" && r.host !== mySeat) return;
+    if (action.type === "acknowledgeEvent") return;
+    const next = applyGameAction(r.gs, mySeat, action);
+    if (next === r.gs) return;
+    commit({...r, gs: next});
+  }
+
+  // ── HOST-AUFGABEN ──
+  useEffect(() => {
+    if (!isHost || !gs || gs.phase !== "trumpSelect") return;
+    if (!room.players[gs.declarer]?.bot) return;
+    const t = setTimeout(() => {
+      const r = roomRef.current;
+      const g = r?.gs;
+      if (!g || g.phase !== "trumpSelect" || !r.players[g.declarer]?.bot) return;
+      commit({...r, gs: applySelectTrump(g, botChooseTrump(g.hands[g.declarer]||[]))});
+    }, 1100);
+    return () => clearTimeout(t);
+  }, [isHost, gs?.phase, gs?.declarer, gs?.handNumber]);
+
+  useEffect(() => {
+    if (!isHost || !gs || gs.phase !== "playing" || gs.trickComplete || !gs.currentTurn) return;
+    const seat = gs.currentTurn;
+    if (!room.players[seat]?.bot) return;
+    const t = setTimeout(() => {
+      const r = roomRef.current;
+      const g = r?.gs;
+      if (!g || g.currentTurn !== seat || g.trickComplete) return;
+      commit({...r, gs: botTakeTurn(g)});
+    }, 900 + Math.random()*500);
+    return () => clearTimeout(t);
+  }, [isHost, gs?.currentTurn, gs?.phase, gs?.trickComplete, gs?.trickNumber]);
+
+  useEffect(() => {
+    if (!isHost || !gs?.trickComplete) return;
+    const delay = gs.pendingEvent ? 3400 : 1300;
+    const t = setTimeout(() => {
+      const r = roomRef.current;
+      if (r?.gs?.trickComplete) commit({...r, gs: applyClearTrick(r.gs)});
+    }, delay);
+    return () => clearTimeout(t);
+  }, [isHost, gs?.trickComplete, gs?.trickNumber, gs?.pendingEvent]);
+
+  if (!gs) {
+    return (
+      <ScreenShell>
+        <TitleBadge subtitle="VERBINDE …"/>
+        <p style={{fontSize:14,opacity:0.5}}>Warte auf Spieldaten …</p>
+        <button onClick={onLeave} style={{marginTop:20,fontSize:13,padding:"10px 16px",borderRadius:PXR,background:COLORS.panelDark,color:COLORS.cream,border:`2px solid #3a2f60`,cursor:"pointer",fontFamily:PIXEL_FONT}}>← VERLASSEN</button>
+      </ScreenShell>
+    );
+  }
+
+  return <GameView
+    gameState={gs}
+    mySeat={mySeat}
+    myHand={gs.hands[mySeat]}
+    onAction={dispatch}
+    canAdvanceHand={isHost}
+    hostName={room.players[room.host]?.name}
+    botSeats={botSeats}
+    roomCode={room.code}
+    connState={connState}
+    onNewGame={()=>{
+      if (!isHost) return;
+      const r = roomRef.current;
+      const names = gs.names;
+      const declarer = SEATS[Math.floor(Math.random()*4)];
+      commit({...r, gs: dealNewGame(names, 1, 0, 0, declarer, ["Neues Spiel."], declarer)});
+    }}
+  />;
+}
+
+function OnlineMode({ onBack }) {
+  const [stage, setStage] = useState("entry");
+  const [roomData, setRoomData] = useState(null);
+  const [isCreator, setIsCreator] = useState(false);
+  const [seatInfo, setSeatInfo] = useState(null);
+
+  if (stage === "entry") {
+    return <OnlineEntryScreen
+      onBack={onBack}
+      onRoomReady={(room, creator)=>{ setRoomData(room); setIsCreator(creator); setStage("lobby"); }}
+    />;
+  }
+  if (stage === "lobby" && roomData) {
+    return <OnlineLobby
+      initialRoom={roomData}
+      isCreator={isCreator}
+      onBack={()=>{ setStage("entry"); setRoomData(null); }}
+      onEnterGame={(room, mySeat, myName)=>{ setSeatInfo({room, mySeat, myName}); setStage("game"); }}
+    />;
+  }
+  if (stage === "game" && seatInfo) {
+    return <OnlineGame
+      initialRoom={seatInfo.room}
+      mySeat={seatInfo.mySeat}
+      myName={seatInfo.myName}
+      onLeave={()=>{ setStage("entry"); setRoomData(null); setSeatInfo(null); }}
+    />;
+  }
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ROOT-APP
+// ─────────────────────────────────────────────────────────────────
+function YamaGame() {
+  const [mode, setMode] = useState(null);
+  const [playerName, setPlayerName] = useState(null);
+
+  if (mode === null) {
+    return (
+      <ScreenShell>
+        <TitleBadge subtitle="4 SPIELER · 2 TEAMS"/>
+        <div style={{width:"100%",maxWidth:320,display:"flex",flexDirection:"column",gap:12}}>
+          <BigButton onClick={()=>setMode("online")}>
+            <Users size={18}/> MIT FREUNDEN (ONLINE)
+          </BigButton>
+          <BigButton onClick={()=>setMode("cpu-persona")} color={COLORS.neonBlue}>
+            <Cpu size={18}/> GEGEN CPU
+          </BigButton>
+        </div>
+        <p style={{fontSize:12,opacity:0.35,marginTop:22,textAlign:"center",lineHeight:1.7,maxWidth:300}}>
+          Online: Raum erstellen, 4-stelligen Code teilen,<br/>Freunde öffnen dieselbe Adresse und treten bei.
+        </p>
+      </ScreenShell>
+    );
+  }
+  if (mode === "cpu-persona") {
+    return <PersonaSelectScreen
+      onSelect={(name)=>{ setPlayerName(name); setMode("cpu"); }}
+      onBack={()=>setMode(null)}
+    />;
+  }
+  if (mode === "cpu" && playerName) {
+    return <CPUMode playerName={playerName}/>;
+  }
+  if (mode === "online") {
+    return <OnlineMode onBack={()=>setMode(null)}/>;
+  }
+  return null;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<YamaGame/>);
+</script>
+<script>
+  // Manuelle Babel-Übersetzung statt automatischem type="text/babel"-Scan.
+  // sourceType:"script" verhindert, dass Babel den Code fälschlich als
+  // ES-Modul interpretiert. Bei Fehlern erscheint eine lesbare Meldung
+  // statt eines dunkelblauen leeren Screens.
+  (function () {
+    try {
+      var source = document.getElementById('app-source').textContent;
+      var result = Babel.transform(source, {
+        presets: ['react'],
+        sourceType: 'script',
+      });
+      var script = document.createElement('script');
+      script.textContent = result.code;
+      document.body.appendChild(script);
+    } catch (err) {
+      console.error('Babel-Übersetzung fehlgeschlagen:', err);
+      var root = document.getElementById('root');
+      if (root) {
+        root.style.cssText = 'color:#fff;font-family:monospace;padding:20px;white-space:pre-wrap;';
+        root.textContent = 'Fehler beim Laden:\n' + (err && err.message ? err.message : err);
+      }
+    }
+  })();
+</script>
+</body>
+</html>
